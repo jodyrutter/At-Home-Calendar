@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hearthboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Self-hosted household rhythm</p>
+          <h1>Hearthboard</h1>
+          <p class="hero-text">
+            One shared schedule for dinners, pickups, chores, appointments, and everything else that keeps the house moving.
+          </p>
+          <div class="hero-actions">
+            <button id="open-create" class="button button-primary" type="button">Add event</button>
+            <button id="jump-today" class="button button-secondary" type="button">Jump to today</button>
+          </div>
+        </div>
+        <div class="hero-meta card">
+          <p class="meta-label">Live household board</p>
+          <h2 id="household-name">Loading household...</h2>
+          <p id="household-timezone" class="muted"></p>
+          <div id="summary-cards" class="summary-cards"></div>
+        </div>
+      </header>
+
+      <main class="layout">
+        <section class="calendar-panel card">
+          <div class="panel-header">
+            <div>
+              <p class="meta-label">Month view</p>
+              <h2 id="month-label">Loading...</h2>
+            </div>
+            <div class="month-actions">
+              <button id="prev-month" class="icon-button" type="button" aria-label="Previous month">&larr;</button>
+              <button id="next-month" class="icon-button" type="button" aria-label="Next month">&rarr;</button>
+            </div>
+          </div>
+
+          <div id="member-filters" class="member-filters"></div>
+          <div class="weekday-row" id="weekday-row"></div>
+          <div id="calendar-grid" class="calendar-grid"></div>
+        </section>
+
+        <aside class="sidebar">
+          <section class="card day-panel">
+            <div class="panel-header tight">
+              <div>
+                <p class="meta-label">Selected day</p>
+                <h2 id="selected-day-label">Today</h2>
+              </div>
+            </div>
+            <div id="selected-day-events" class="stack"></div>
+          </section>
+
+          <section class="card">
+            <div class="panel-header tight">
+              <div>
+                <p class="meta-label">Upcoming</p>
+                <h2>What is next</h2>
+              </div>
+            </div>
+            <div id="upcoming-events" class="stack"></div>
+          </section>
+
+          <section class="card">
+            <div class="panel-header tight">
+              <div>
+                <p class="meta-label">Household roster</p>
+                <h2>Who is on the board</h2>
+              </div>
+              <button id="open-member-modal" class="button button-secondary" type="button">Add member</button>
+            </div>
+            <div id="member-list" class="stack"></div>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <dialog id="event-modal" class="modal">
+      <form id="event-form" class="modal-form">
+        <div class="modal-header">
+          <div>
+            <p class="meta-label">Schedule editor</p>
+            <h2 id="event-modal-title">Add event</h2>
+          </div>
+          <button id="close-event-modal" class="icon-button" type="button" aria-label="Close">&times;</button>
+        </div>
+
+        <label>
+          Title
+          <input name="title" type="text" maxlength="120" required />
+        </label>
+
+        <div class="split-fields">
+          <label>
+            Date
+            <input name="date" type="date" required />
+          </label>
+          <label>
+            End date
+            <input name="endDate" type="date" required />
+          </label>
+        </div>
+
+        <label class="checkbox-field">
+          <input name="allDay" type="checkbox" />
+          All-day event
+        </label>
+
+        <div class="split-fields">
+          <label>
+            Start time
+            <input name="startTime" type="time" required />
+          </label>
+          <label>
+            End time
+            <input name="endTime" type="time" required />
+          </label>
+        </div>
+
+        <div class="split-fields">
+          <label>
+            Category
+            <select name="category">
+              <option>General</option>
+              <option>Meals</option>
+              <option>School</option>
+              <option>Work</option>
+              <option>Chores</option>
+              <option>Health</option>
+              <option>Travel</option>
+              <option>Social</option>
+            </select>
+          </label>
+          <label>
+            Location
+            <input name="location" type="text" maxlength="120" />
+          </label>
+        </div>
+
+        <label>
+          Notes
+          <textarea name="description" rows="4" maxlength="600"></textarea>
+        </label>
+
+        <fieldset>
+          <legend>Assign household members</legend>
+          <div id="member-checkboxes" class="checkbox-grid"></div>
+        </fieldset>
+
+        <p id="event-form-error" class="form-error" hidden></p>
+
+        <div class="modal-actions">
+          <button id="delete-event" class="button button-danger" type="button" hidden>Delete</button>
+          <button class="button button-secondary" type="button" data-close-dialog="event-modal">Cancel</button>
+          <button class="button button-primary" type="submit">Save event</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="member-modal" class="modal">
+      <form id="member-form" class="modal-form">
+        <div class="modal-header">
+          <div>
+            <p class="meta-label">Household roster</p>
+            <h2>Add member</h2>
+          </div>
+          <button id="close-member-modal" class="icon-button" type="button" aria-label="Close">&times;</button>
+        </div>
+
+        <label>
+          Name
+          <input name="name" type="text" maxlength="80" required />
+        </label>
+
+        <label>
+          Role
+          <input name="role" type="text" maxlength="120" placeholder="School pickup, meal prep, remote work..." />
+        </label>
+
+        <label>
+          Color
+          <input name="color" type="color" value="#2563eb" />
+        </label>
+
+        <p id="member-form-error" class="form-error" hidden></p>
+
+        <div class="modal-actions">
+          <button class="button button-secondary" type="button" data-close-dialog="member-modal">Cancel</button>
+          <button class="button button-primary" type="submit">Add member</button>
+        </div>
+      </form>
+    </dialog>
+
+    <template id="empty-state-template">
+      <div class="empty-state">
+        <p>No events yet for this view.</p>
+      </div>
+    </template>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

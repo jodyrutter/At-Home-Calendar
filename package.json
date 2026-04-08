@@ -1,0 +1,26 @@
+{
+  "name": "hearthboard",
+  "version": "1.0.0",
+  "description": "A self-hosted household calendar and schedule board for local networks.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test"
+  },
+  "keywords": [
+    "calendar",
+    "schedule",
+    "household",
+    "docker",
+    "self-hosted"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "express": "^5.2.1",
+    "lowdb": "^7.0.1",
+    "nanoid": "^5.1.7"
+  }
+}

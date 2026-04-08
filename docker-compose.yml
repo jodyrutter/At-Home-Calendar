@@ -1,0 +1,19 @@
+services:
+  hearthboard:
+    build:
+      context: .
+    container_name: hearthboard
+    ports:
+      - "42069:42069"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 42069
+      DATA_DIR: /app/data
+      APP_TIMEZONE: America/Port-au-Prince
+      HOUSEHOLD_NAME: Hearthboard Household
+    volumes:
+      - hearthboard-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  hearthboard-data:
