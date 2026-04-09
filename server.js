@@ -18,79 +18,8 @@ const HOUSEHOLD_NAME = process.env.HOUSEHOLD_NAME || "Hearthboard Household";
 
 const palette = ["#f97316", "#14b8a6", "#8b5cf6", "#ef4444", "#2563eb", "#ca8a04"];
 
-function localIso(date) {
-  const timezoneOffset = date.getTimezoneOffset() * 60000;
-  return new Date(date.getTime() - timezoneOffset).toISOString();
-}
-
-function addDays(date, days) {
-  const next = new Date(date);
-  next.setDate(next.getDate() + days);
-  return next;
-}
-
-function roundToNextHalfHour(date = new Date()) {
-  const rounded = new Date(date);
-  rounded.setSeconds(0, 0);
-  const minutes = rounded.getMinutes();
-  if (minutes === 0 || minutes === 30) {
-    return rounded;
-  }
-  rounded.setMinutes(minutes < 30 ? 30 : 60);
-  return rounded;
-}
-
 function seedMembers() {
-  return [
-    { id: nanoid(), name: "Alex", role: "Home base captain", color: "#f97316" },
-    { id: nanoid(), name: "Jordan", role: "Logistics ace", color: "#14b8a6" },
-    { id: nanoid(), name: "Casey", role: "School shuttle", color: "#8b5cf6" }
-  ];
-}
-
-function buildSeedEvents(members) {
-  const anchor = roundToNextHalfHour();
-  return [
-    {
-      id: nanoid(),
-      title: "Family dinner",
-      description: "Everyone checks in and sets tomorrow's priorities.",
-      category: "Meals",
-      location: "Kitchen",
-      start: localIso(addDays(anchor, 0)),
-      end: localIso(new Date(addDays(anchor, 0).getTime() + 60 * 60 * 1000)),
-      memberIds: members.map((member) => member.id),
-      allDay: false,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    },
-    {
-      id: nanoid(),
-      title: "School pickup",
-      description: "Bring snacks and soccer bag.",
-      category: "School",
-      location: "North gate",
-      start: localIso(addDays(anchor, 1)),
-      end: localIso(new Date(addDays(anchor, 1).getTime() + 45 * 60 * 1000)),
-      memberIds: [members[0].id, members[2].id],
-      allDay: false,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    },
-    {
-      id: nanoid(),
-      title: "Deep clean block",
-      description: "Reset bedrooms, bathroom, and shared spaces before the weekend.",
-      category: "Chores",
-      location: "Home",
-      start: localIso(addDays(anchor, 2)),
-      end: localIso(new Date(addDays(anchor, 2).getTime() + 2 * 60 * 60 * 1000)),
-      memberIds: [members[0].id, members[1].id],
-      allDay: false,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    }
-  ];
+  return [{ id: nanoid(), name: "Jody", role: "", color: "#2473eb" }];
 }
 
 function defaultData() {
@@ -99,7 +28,7 @@ function defaultData() {
     householdName: HOUSEHOLD_NAME,
     timezone: APP_TIMEZONE,
     members,
-    events: buildSeedEvents(members)
+    events: []
   };
 }
 

@@ -22,7 +22,7 @@ async function waitForServer(port) {
   throw new Error("Server did not become ready in time.");
 }
 
-test("bootstrap endpoint returns seeded household data", async (t) => {
+test("bootstrap endpoint returns a clean household with only Jody seeded", async (t) => {
   const dataDir = await mkdtemp(path.join(tmpdir(), "hearthboard-"));
   const port = 42110;
   const server = spawn(process.execPath, ["server.js"], {
@@ -50,6 +50,7 @@ test("bootstrap endpoint returns seeded household data", async (t) => {
   assert.equal(payload.householdName, "Test House");
   assert.equal(Array.isArray(payload.members), true);
   assert.equal(Array.isArray(payload.events), true);
-  assert.ok(payload.members.length >= 3);
-  assert.ok(payload.events.length >= 3);
+  assert.equal(payload.members.length, 1);
+  assert.equal(payload.members[0].name, "Jody");
+  assert.equal(payload.events.length, 0);
 });
