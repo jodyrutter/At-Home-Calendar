@@ -107,8 +107,11 @@ test("media library browse and search stay read-only and scoped to configured ro
   const dataDir = await mkdtemp(path.join(tmpdir(), "hearthboard-"));
   const mediaDir = await mkdtemp(path.join(tmpdir(), "hearthboard-media-"));
   await mkdir(path.join(mediaDir, "Clearwater", "2023-07-01"), { recursive: true });
+  await mkdir(path.join(mediaDir, "Pretty Pictures"), { recursive: true });
   await writeFile(path.join(mediaDir, "Clearwater", "2023-07-01", "DJI_0001.JPG"), "fake-jpg");
+  await writeFile(path.join(mediaDir, "Clearwater", "2023-07-01", "DJI_0002.MP4"), "fake-mp4");
   await writeFile(path.join(mediaDir, "Clearwater", "2023-07-01", "Pano.html"), "<html><body>panorama</body></html>");
+  await writeFile(path.join(mediaDir, "Pretty Pictures", "secret.jpg"), "hidden");
 
   const port = 42112;
   const server = spawn(process.execPath, ["server.js"], {
@@ -118,7 +121,7 @@ test("media library browse and search stay read-only and scoped to configured ro
       PORT: String(port),
       HOST: "127.0.0.1",
       DATA_DIR: dataDir,
-      MEDIA_LIBRARY_ROOTS: JSON.stringify([{ id: "drone", label: "Drone pictures", path: mediaDir }])
+      MEDIA_LIBRARY_ROOTS: JSON.stringify([{ id: "drone", label: "Drone pictures", path: mediaDir, excludePaths: ["Pretty Pictures"] }])
     },
     stdio: "inherit"
   });
@@ -132,8 +135,11 @@ test("media library browse and search stay read-only and scoped to configured ro
   const browseResponse = await fetch(`http://127.0.0.1:${port}/api/media/browse?library=drone&path=${encodeURIComponent("Clearwater/2023-07-01")}`);
   assert.equal(browseResponse.status, 200);
   const browsePayload = await browseResponse.json();
-  assert.equal(browsePayload.files.length, 2);
+  assert.equal(browsePayload.files.length, 3);
   assert.ok(browsePayload.files.some((file) => file.mediaType === "image"));
+  const videoFile = browsePayload.files.find((file) => file.mediaType === "video");
+  assert.ok(videoFile);
+  assert.match(videoFile.thumbnailUrl, /^\/media-thumb\/drone\//);
   assert.ok(browsePayload.files.some((file) => file.mediaType === "panorama"));
 
   const searchResponse = await fetch(`http://127.0.0.1:${port}/api/media/search?library=drone&q=${encodeURIComponent("pano")}`);
@@ -145,8 +151,20 @@ test("media library browse and search stay read-only and scoped to configured ro
   const filteredBrowseResponse = await fetch(`http://127.0.0.1:${port}/api/media/browse?library=drone&path=${encodeURIComponent("Clearwater/2023-07-01")}&type=video`);
   assert.equal(filteredBrowseResponse.status, 200);
   const filteredBrowsePayload = await filteredBrowseResponse.json();
-  assert.equal(filteredBrowsePayload.files.length, 0);
+  assert.equal(filteredBrowsePayload.files.length, 1);
+  assert.equal(filteredBrowsePayload.files[0].mediaType, "video");
 
   const blockedTraversal = await fetch(`http://127.0.0.1:${port}/api/media/browse?library=drone&path=${encodeURIComponent("../")}`);
   assert.equal(blockedTraversal.status, 400);
+
+  const excludedFolderBrowse = await fetch(`http://127.0.0.1:${port}/api/media/browse?library=drone&path=${encodeURIComponent("Pretty Pictures")}`);
+  assert.equal(excludedFolderBrowse.status, 400);
+
+  const rootBrowse = await fetch(`http://127.0.0.1:${port}/api/media/browse?library=drone&path=`);
+  assert.equal(rootBrowse.status, 200);
+  const rootPayload = await rootBrowse.json();
+  assert.equal(rootPayload.directories.some((directory) => directory.name === "Pretty Pictures"), false);
+
+  const blockedMedia = await fetch(`http://127.0.0.1:${port}/media/drone/${encodeURIComponent("Pretty Pictures")}/secret.jpg`);
+  assert.equal(blockedMedia.status, 400);
 });

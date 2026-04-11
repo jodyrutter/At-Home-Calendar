@@ -292,11 +292,29 @@ function mediaCard(file) {
     image.decoding = "async";
     thumbButton.append(image);
   } else if (file.mediaType === "video") {
-    const video = document.createElement("video");
-    video.src = file.url;
-    video.preload = "metadata";
-    video.muted = true;
-    thumbButton.append(video);
+    const frame = document.createElement("div");
+    frame.className = "media-video-thumb";
+
+    const image = document.createElement("img");
+    image.src = file.thumbnailUrl || "";
+    image.alt = `${file.name} thumbnail`;
+    image.loading = "lazy";
+    image.decoding = "async";
+    image.addEventListener("error", () => {
+      image.remove();
+      frame.dataset.ready = "false";
+    });
+
+    const badge = document.createElement("span");
+    badge.className = "media-video-badge";
+    badge.textContent = "Video";
+
+    const hint = document.createElement("span");
+    hint.className = "media-video-hint";
+    hint.textContent = "Click to open";
+
+    frame.append(image, badge, hint);
+    thumbButton.append(frame);
   } else if (file.mediaType === "panorama") {
     thumbButton.innerHTML = '<div class="media-placeholder">Panorama<br />HTML view</div>';
   } else {

@@ -11,12 +11,20 @@ services:
       DATA_DIR: /app/data
       APP_TIMEZONE: America/Port-au-Prince
       HOUSEHOLD_NAME: Hearthboard Household
-      MEDIA_LIBRARY_ROOTS: '[{"id":"drone","label":"Drone pictures","path":"/libraries/drone"}]'
+      MEDIA_LIBRARY_ROOTS: '[{"id":"drone","label":"Drone pictures","path":"/libraries/drone"},{"id":"japan","label":"Japan","path":"/libraries/japan"},{"id":"general","label":"General","path":"/libraries/general","excludePaths":["Pretty Pictures"]}]'
     volumes:
       - hearthboard-data:/app/data
       - type: bind
         source: E:/Drone
         target: /libraries/drone
+        read_only: true
+      - type: bind
+        source: D:/Home/Japan-photos
+        target: /libraries/japan
+        read_only: true
+      - type: bind
+        source: D:/Home/Pictures
+        target: /libraries/general
         read_only: true
     restart: unless-stopped
 

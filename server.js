@@ -1,6 +1,8 @@
 import express from "express";
-import { mkdir, readdir, stat } from "node:fs/promises";
+import { mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
+import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { JSONFilePreset } from "lowdb/node";
 import { nanoid } from "nanoid";
@@ -13,9 +15,11 @@ const PORT = Number(process.env.PORT || 42069);
 const HOST = process.env.HOST || "0.0.0.0";
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 const DB_FILE = path.join(DATA_DIR, "store.json");
+const THUMBNAIL_DIR = path.join(DATA_DIR, "media-thumbs");
 const APP_TIMEZONE = process.env.APP_TIMEZONE || "America/Port-au-Prince";
 const HOUSEHOLD_NAME = process.env.HOUSEHOLD_NAME || "Hearthboard Household";
 const MEDIA_LIBRARY_ROOTS = process.env.MEDIA_LIBRARY_ROOTS || "";
+const FFMPEG_BIN = process.env.FFMPEG_BIN || "/usr/bin/ffmpeg";
 
 const palette = ["#f97316", "#14b8a6", "#8b5cf6", "#ef4444", "#2563eb", "#ca8a04"];
 const imageExtensions = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif"]);
@@ -26,7 +30,7 @@ const supportExtensions = new Set([".txt", ".gz", ".json", ".js", ".css"]);
 
 function defaultMediaLibraries() {
   if (process.platform === "win32") {
-    return [{ id: "drone", label: "Drone pictures", path: "E:\\Drone" }];
+    return [{ id: "drone", label: "Drone pictures", path: "E:\\Drone", excludePaths: [] }];
   }
 
   return [];
@@ -47,7 +51,12 @@ function parseMediaLibraries() {
       .map((entry) => ({
         id: String(entry.id || "").trim(),
         label: String(entry.label || entry.id || "").trim(),
-        path: String(entry.path || "").trim()
+        path: String(entry.path || "").trim(),
+        excludePaths: Array.isArray(entry.excludePaths)
+          ? entry.excludePaths
+              .map((excludePath) => String(excludePath || "").replaceAll("\\", "/").trim().replace(/^\/+|\/+$/g, ""))
+              .filter(Boolean)
+          : []
       }))
       .filter((entry) => entry.id && entry.label && entry.path);
   } catch {
@@ -74,7 +83,9 @@ function defaultData() {
 }
 
 await mkdir(DATA_DIR, { recursive: true });
+await mkdir(THUMBNAIL_DIR, { recursive: true });
 const db = await JSONFilePreset(DB_FILE, defaultData());
+const pendingThumbnailJobs = new Map();
 
 if (!Array.isArray(db.data.bulletins)) {
   db.data.bulletins = [];
@@ -243,6 +254,19 @@ function getMediaLibrary(libraryId) {
   return mediaLibraryMap.get(String(libraryId || "").trim()) || null;
 }
 
+function relativePathFromLibrary(library, absolutePath) {
+  return path.relative(library.path, absolutePath).split(path.sep).join("/");
+}
+
+function isExcludedRelativePath(library, relativePath = "") {
+  const normalizedRelativePath = String(relativePath || "").replaceAll("\\", "/").replace(/^\/+|\/+$/g, "");
+  if (!normalizedRelativePath) {
+    return false;
+  }
+
+  return library.excludePaths.some((excludedPath) => normalizedRelativePath === excludedPath || normalizedRelativePath.startsWith(`${excludedPath}/`));
+}
+
 function resolveMediaPath(library, relativePath = "") {
   const requestedPath = String(relativePath || "").replaceAll("\\", "/");
   const segments = requestedPath
@@ -256,12 +280,14 @@ function resolveMediaPath(library, relativePath = "") {
     return null;
   }
 
+  if (isExcludedRelativePath(library, relativeToRoot)) {
+    return null;
+  }
+
   return resolved;
 }
 
-function relativeMediaPath(library, absolutePath) {
-  return path.relative(library.path, absolutePath).split(path.sep).join("/");
-}
+const relativeMediaPath = relativePathFromLibrary;
 
 function buildMediaUrl(libraryId, relativePath) {
   const encodedPath = relativePath
@@ -273,6 +299,102 @@ function buildMediaUrl(libraryId, relativePath) {
   return `/media/${encodeURIComponent(libraryId)}${encodedPath ? `/${encodedPath}` : ""}`;
 }
 
+function buildVideoThumbnailUrl(libraryId, relativePath) {
+  const encodedPath = relativePath
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+
+  return `/media-thumb/${encodeURIComponent(libraryId)}${encodedPath ? `/${encodedPath}` : ""}`;
+}
+
+function thumbnailCachePath(library, relativePath, fileStat) {
+  const hash = createHash("sha1")
+    .update(`${library.id}:${relativePath}:${fileStat.size}:${fileStat.mtimeMs}`)
+    .digest("hex");
+
+  return path.join(THUMBNAIL_DIR, `${library.id}-${hash}.jpg`);
+}
+
+async function fileExists(targetPath) {
+  try {
+    await stat(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function runFfmpegThumbnail(inputPath, outputPath) {
+  return new Promise((resolve, reject) => {
+    const args = [
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-i",
+      inputPath,
+      "-vf",
+      "thumbnail=120,scale=640:-1:force_original_aspect_ratio=decrease",
+      "-frames:v",
+      "1",
+      "-q:v",
+      "4",
+      "-y",
+      outputPath
+    ];
+
+    const process = spawn(FFMPEG_BIN, args, { stdio: "ignore" });
+    process.once("error", reject);
+    process.once("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+
+      reject(new Error(`ffmpeg exited with code ${code}`));
+    });
+  });
+}
+
+async function ensureVideoThumbnail(library, resolvedPath, relativePath, fileStat) {
+  const cachePath = thumbnailCachePath(library, relativePath, fileStat);
+  if (await fileExists(cachePath)) {
+    return cachePath;
+  }
+
+  if (pendingThumbnailJobs.has(cachePath)) {
+    return pendingThumbnailJobs.get(cachePath);
+  }
+
+  const job = (async () => {
+    const tempPath = `${cachePath}.${process.pid}.${Date.now()}.tmp.jpg`;
+
+    try {
+      await runFfmpegThumbnail(resolvedPath, tempPath);
+      try {
+        await rename(tempPath, cachePath);
+      } catch {
+        if (!(await fileExists(cachePath))) {
+          throw new Error("Thumbnail cache move failed.");
+        }
+      }
+    } finally {
+      await rm(tempPath, { force: true }).catch(() => {});
+    }
+
+    return cachePath;
+  })();
+
+  pendingThumbnailJobs.set(cachePath, job);
+
+  try {
+    return await job;
+  } finally {
+    pendingThumbnailJobs.delete(cachePath);
+  }
+}
+
 async function describeDirectory(library, directoryPath) {
   const entries = await readdir(directoryPath, { withFileTypes: true });
   const directories = [];
@@ -280,6 +402,10 @@ async function describeDirectory(library, directoryPath) {
   for (const entry of entries) {
     const fullPath = path.join(directoryPath, entry.name);
     const relativePath = relativeMediaPath(library, fullPath);
+
+    if (isExcludedRelativePath(library, relativePath)) {
+      continue;
+    }
 
     if (entry.isDirectory()) {
       directories.push({
@@ -315,6 +441,11 @@ async function collectMediaFiles(library, startPath, { query = "", type = "all",
 
     for (const entry of entries) {
       const fullPath = path.join(currentDirectory, entry.name);
+      const relativePath = relativeMediaPath(library, fullPath);
+
+      if (isExcludedRelativePath(library, relativePath)) {
+        continue;
+      }
 
       if (entry.isDirectory()) {
         queue.push(fullPath);
@@ -335,7 +466,6 @@ async function collectMediaFiles(library, startPath, { query = "", type = "all",
         continue;
       }
 
-      const relativePath = relativeMediaPath(library, fullPath);
       if (lowered && !relativePath.toLowerCase().includes(lowered)) {
         continue;
       }
@@ -348,7 +478,8 @@ async function collectMediaFiles(library, startPath, { query = "", type = "all",
         extension,
         size: fileStat.size,
         modifiedAt: fileStat.mtime.toISOString(),
-        url: buildMediaUrl(library.id, relativePath)
+        url: buildMediaUrl(library.id, relativePath),
+        thumbnailUrl: mediaType === "video" ? buildVideoThumbnailUrl(library.id, relativePath) : null
       });
 
       if (matches.length >= limit) {
@@ -612,6 +743,41 @@ app.get(/^\/media\/([^/]+)(?:\/(.*))?$/, async (request, response) => {
   }
 
   return response.sendFile(resolvedPath);
+});
+
+app.get(/^\/media-thumb\/([^/]+)(?:\/(.*))?$/, async (request, response) => {
+  const library = getMediaLibrary(request.params[0]);
+  if (!library) {
+    return response.status(404).send("Media library not found.");
+  }
+
+  const relativePath = request.params[1] || "";
+  const resolvedPath = resolveMediaPath(library, relativePath);
+  if (!resolvedPath) {
+    return response.status(400).send("Invalid media path.");
+  }
+
+  let fileStat;
+  try {
+    fileStat = await stat(resolvedPath);
+  } catch {
+    return response.status(404).send("Media file not found.");
+  }
+
+  if (!fileStat.isFile() || mediaTypeForExtension(path.extname(resolvedPath)) !== "video") {
+    return response.status(404).send("Video thumbnail not found.");
+  }
+
+  let cachePath;
+  try {
+    cachePath = await ensureVideoThumbnail(library, resolvedPath, relativePath, fileStat);
+  } catch {
+    return response.status(503).send("Video thumbnails are not available right now.");
+  }
+
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.setHeader("Cache-Control", "private, max-age=86400");
+  return response.sendFile(cachePath);
 });
 
 app.get("/gallery", (_request, response) => {
