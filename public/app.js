@@ -3,10 +3,12 @@ const state = {
   timezone: "",
   members: [],
   events: [],
+  bulletins: [],
   selectedDate: toDateKey(new Date()),
   visibleMonth: startOfMonth(new Date()),
   activeFilters: new Set(),
   editingEventId: null,
+  editingBulletinId: null,
   filtersInitialized: false
 };
 
@@ -22,16 +24,22 @@ const elements = {
   selectedDayLabel: document.querySelector("#selected-day-label"),
   selectedDayEvents: document.querySelector("#selected-day-events"),
   upcomingEvents: document.querySelector("#upcoming-events"),
+  bulletinList: document.querySelector("#bulletin-list"),
   memberFilters: document.querySelector("#member-filters"),
   memberList: document.querySelector("#member-list"),
   eventModal: document.querySelector("#event-modal"),
+  bulletinModal: document.querySelector("#bulletin-modal"),
   memberModal: document.querySelector("#member-modal"),
   eventForm: document.querySelector("#event-form"),
+  bulletinForm: document.querySelector("#bulletin-form"),
   memberForm: document.querySelector("#member-form"),
   eventModalTitle: document.querySelector("#event-modal-title"),
+  bulletinModalTitle: document.querySelector("#bulletin-modal-title"),
   deleteEvent: document.querySelector("#delete-event"),
+  deleteBulletin: document.querySelector("#delete-bulletin"),
   memberCheckboxes: document.querySelector("#member-checkboxes"),
   eventFormError: document.querySelector("#event-form-error"),
+  bulletinFormError: document.querySelector("#bulletin-form-error"),
   memberFormError: document.querySelector("#member-form-error"),
   emptyStateTemplate: document.querySelector("#empty-state-template")
 };
@@ -96,6 +104,15 @@ function formatDateInput(date) {
 
 function formatTimeInput(date) {
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function formatTimestamp(value) {
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(new Date(value));
 }
 
 function eventOverlapsDay(event, dateKey) {
@@ -167,6 +184,7 @@ async function loadBoard() {
   state.timezone = payload.timezone;
   state.members = payload.members;
   state.events = payload.events;
+  state.bulletins = payload.bulletins || [];
 
   const validMemberIds = new Set(payload.members.map((member) => member.id));
   state.activeFilters = new Set([...state.activeFilters].filter((memberId) => validMemberIds.has(memberId)));
@@ -185,6 +203,7 @@ function render() {
   renderCalendar();
   renderSelectedDay();
   renderUpcoming();
+  renderBulletins();
   renderMembers();
   renderMemberCheckboxes();
 }
@@ -210,8 +229,8 @@ function renderHeader() {
       <span>Upcoming in the next 7 days</span>
     </div>
     <div class="summary-card">
-      <strong>${state.members.length}</strong>
-      <span>Household members on the roster</span>
+      <strong>${state.bulletins.length}</strong>
+      <span>Live messages on the board</span>
     </div>
   `;
 }
@@ -349,6 +368,21 @@ function renderMembers() {
   });
 }
 
+function renderBulletins() {
+  elements.bulletinList.innerHTML = "";
+
+  if (state.bulletins.length === 0) {
+    const node = emptyStateNode();
+    node.querySelector("p").textContent = "No household messages yet.";
+    elements.bulletinList.append(node);
+    return;
+  }
+
+  state.bulletins.forEach((bulletin) => {
+    elements.bulletinList.append(bulletinCard(bulletin));
+  });
+}
+
 function renderMemberCheckboxes() {
   elements.memberCheckboxes.innerHTML = "";
   state.members.forEach((member) => {
@@ -394,6 +428,30 @@ function eventCard(event, includeEdit = true) {
   return article;
 }
 
+function bulletinCard(bulletin) {
+  const article = document.createElement("article");
+  article.className = "bulletin-card";
+  article.dataset.tone = bulletin.tone;
+  article.dataset.pinned = String(Boolean(bulletin.pinned));
+  article.innerHTML = `
+    <div class="bulletin-topline">
+      <h3>${bulletin.title}</h3>
+      <button type="button" class="link-button">Edit</button>
+    </div>
+    <div class="bulletin-meta">
+      <div class="bulletin-tag-row">
+        <span class="bulletin-tag">${bulletin.tone}</span>
+        ${bulletin.pinned ? '<span class="bulletin-tag pinned">Pinned</span>' : ""}
+      </div>
+      <span class="event-card-meta">${bulletin.author} | ${formatTimestamp(bulletin.createdAt)}</span>
+    </div>
+    <p class="bulletin-message">${bulletin.message}</p>
+  `;
+
+  article.querySelector(".link-button").addEventListener("click", () => openBulletinModal(bulletin));
+  return article;
+}
+
 function emptyStateNode() {
   return elements.emptyStateTemplate.content.firstElementChild.cloneNode(true);
 }
@@ -418,6 +476,15 @@ function resetEventForm(dateValue = state.selectedDate) {
     input.checked = false;
   });
   toggleTimeFields();
+}
+
+function resetBulletinForm() {
+  state.editingBulletinId = null;
+  elements.bulletinModalTitle.textContent = "Post message";
+  elements.deleteBulletin.hidden = true;
+  elements.bulletinFormError.hidden = true;
+  elements.bulletinForm.reset();
+  elements.bulletinForm.elements.tone.value = "Note";
 }
 
 function openEventModal(event = null) {
@@ -451,6 +518,25 @@ function openEventModal(event = null) {
 
   toggleTimeFields();
   elements.eventModal.showModal();
+}
+
+function openBulletinModal(bulletin = null) {
+  if (!bulletin) {
+    resetBulletinForm();
+    elements.bulletinModal.showModal();
+    return;
+  }
+
+  state.editingBulletinId = bulletin.id;
+  elements.bulletinModalTitle.textContent = "Edit message";
+  elements.deleteBulletin.hidden = false;
+  elements.bulletinFormError.hidden = true;
+  elements.bulletinForm.elements.title.value = bulletin.title;
+  elements.bulletinForm.elements.author.value = bulletin.author || "";
+  elements.bulletinForm.elements.tone.value = bulletin.tone;
+  elements.bulletinForm.elements.pinned.checked = Boolean(bulletin.pinned);
+  elements.bulletinForm.elements.message.value = bulletin.message;
+  elements.bulletinModal.showModal();
 }
 
 function closeModal(modal) {
@@ -530,6 +616,33 @@ async function handleMemberSubmit(event) {
   }
 }
 
+async function handleBulletinSubmit(event) {
+  event.preventDefault();
+  elements.bulletinFormError.hidden = true;
+
+  const formData = new FormData(elements.bulletinForm);
+  const body = {
+    title: String(formData.get("title") || "").trim(),
+    author: String(formData.get("author") || "").trim(),
+    tone: String(formData.get("tone") || "Note"),
+    pinned: formData.get("pinned") === "on",
+    message: String(formData.get("message") || "").trim()
+  };
+
+  try {
+    if (state.editingBulletinId) {
+      await api(`/api/bulletins/${state.editingBulletinId}`, { method: "PATCH", body: JSON.stringify(body) });
+    } else {
+      await api("/api/bulletins", { method: "POST", body: JSON.stringify(body) });
+    }
+    await loadBoard();
+    closeModal(elements.bulletinModal);
+  } catch (error) {
+    elements.bulletinFormError.textContent = error.message;
+    elements.bulletinFormError.hidden = false;
+  }
+}
+
 async function deleteCurrentEvent() {
   if (!state.editingEventId) {
     return;
@@ -540,8 +653,19 @@ async function deleteCurrentEvent() {
   closeModal(elements.eventModal);
 }
 
+async function deleteCurrentBulletin() {
+  if (!state.editingBulletinId) {
+    return;
+  }
+
+  await api(`/api/bulletins/${state.editingBulletinId}`, { method: "DELETE" });
+  await loadBoard();
+  closeModal(elements.bulletinModal);
+}
+
 function bindEvents() {
   document.querySelector("#open-create").addEventListener("click", () => openEventModal());
+  document.querySelector("#open-bulletin-modal").addEventListener("click", () => openBulletinModal());
   document.querySelector("#jump-today").addEventListener("click", () => {
     state.selectedDate = toDateKey(new Date());
     state.visibleMonth = startOfMonth(new Date());
@@ -560,6 +684,7 @@ function bindEvents() {
     elements.memberModal.showModal();
   });
   document.querySelector("#close-event-modal").addEventListener("click", () => closeModal(elements.eventModal));
+  document.querySelector("#close-bulletin-modal").addEventListener("click", () => closeModal(elements.bulletinModal));
   document.querySelector("#close-member-modal").addEventListener("click", () => closeModal(elements.memberModal));
   document.querySelectorAll("[data-close-dialog]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -568,6 +693,7 @@ function bindEvents() {
   });
 
   elements.eventForm.addEventListener("submit", handleEventSubmit);
+  elements.bulletinForm.addEventListener("submit", handleBulletinSubmit);
   elements.memberForm.addEventListener("submit", handleMemberSubmit);
   elements.eventForm.elements.allDay.addEventListener("change", toggleTimeFields);
   elements.deleteEvent.addEventListener("click", async () => {
@@ -576,6 +702,14 @@ function bindEvents() {
     } catch (error) {
       elements.eventFormError.textContent = error.message;
       elements.eventFormError.hidden = false;
+    }
+  });
+  elements.deleteBulletin.addEventListener("click", async () => {
+    try {
+      await deleteCurrentBulletin();
+    } catch (error) {
+      elements.bulletinFormError.textContent = error.message;
+      elements.bulletinFormError.hidden = false;
     }
   });
 }

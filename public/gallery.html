@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hearthboard Gallery</title>
+    <meta name="theme-color" content="#dd6b20" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="shortcut icon" href="/favicon.svg" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <nav class="site-nav card" aria-label="Primary">
+        <a class="nav-brand" href="/">Hearthboard</a>
+        <div class="nav-links">
+          <a class="nav-link" href="/">Calendar</a>
+          <a class="nav-link is-active" href="/gallery">Gallery</a>
+        </div>
+      </nav>
+
+      <header class="hero hero-gallery">
+        <div class="hero-copy">
+          <p class="eyebrow">Read-only media library</p>
+          <h1>Hearthboard Gallery</h1>
+          <p class="hero-text">
+            Browse pictures, videos, and panoramas exactly the way they are organized on disk, without exposing any delete or edit controls.
+          </p>
+        </div>
+        <div class="hero-meta card">
+          <p class="meta-label">Live library</p>
+          <h2 id="gallery-library-label">Loading library...</h2>
+          <p id="gallery-path-label" class="muted">Preparing folders...</p>
+          <div id="gallery-summary" class="summary-cards"></div>
+        </div>
+      </header>
+
+      <main class="gallery-layout">
+        <aside class="gallery-sidebar card">
+          <div class="panel-header tight">
+            <div>
+              <p class="meta-label">Categories</p>
+              <h2>Libraries</h2>
+            </div>
+          </div>
+          <div id="library-tabs" class="stack"></div>
+
+          <div class="panel-header tight section-top">
+            <div>
+              <p class="meta-label">Search</p>
+              <h2>Find media</h2>
+            </div>
+          </div>
+          <label class="gallery-search-label">
+            <span class="sr-only">Search media</span>
+            <input id="gallery-search" type="search" placeholder="Search file names or places" />
+          </label>
+          <div id="search-status" class="gallery-search-status muted"></div>
+
+          <div class="panel-header tight section-top">
+            <div>
+              <p class="meta-label">Folders</p>
+              <h2>Current location</h2>
+            </div>
+          </div>
+          <div id="folder-list" class="stack"></div>
+        </aside>
+
+        <section class="gallery-main card">
+          <div class="panel-header gallery-main-header">
+            <div>
+              <p class="meta-label">Breadcrumbs</p>
+              <div id="breadcrumbs" class="breadcrumbs"></div>
+            </div>
+            <div id="type-filters" class="member-filters"></div>
+          </div>
+
+          <div id="media-grid" class="media-grid"></div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="viewer-modal" class="modal viewer-modal">
+      <div class="modal-form">
+        <div class="modal-header">
+          <div>
+            <p class="meta-label">Media viewer</p>
+            <h2 id="viewer-title">Preview</h2>
+          </div>
+          <button id="close-viewer-modal" class="icon-button" type="button" aria-label="Close">&times;</button>
+        </div>
+        <div id="viewer-meta" class="event-card-meta"></div>
+        <div id="viewer-body" class="viewer-body"></div>
+      </div>
+    </dialog>
+
+    <template id="empty-state-template">
+      <div class="empty-state">
+        <p>No media found for this view.</p>
+      </div>
+    </template>
+
+    <script type="module" src="/gallery.js"></script>
+  </body>
+</html>

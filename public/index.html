@@ -4,10 +4,21 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Hearthboard</title>
+    <meta name="theme-color" content="#dd6b20" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="shortcut icon" href="/favicon.svg" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <div class="page-shell">
+      <nav class="site-nav card" aria-label="Primary">
+        <a class="nav-brand" href="/">Hearthboard</a>
+        <div class="nav-links">
+          <a class="nav-link is-active" href="/">Calendar</a>
+          <a class="nav-link" href="/gallery">Gallery</a>
+        </div>
+      </nav>
+
       <header class="hero">
         <div class="hero-copy">
           <p class="eyebrow">Self-hosted household rhythm</p>
@@ -18,6 +29,7 @@
           <div class="hero-actions">
             <button id="open-create" class="button button-primary" type="button">Add event</button>
             <button id="jump-today" class="button button-secondary" type="button">Jump to today</button>
+            <a class="button button-secondary" href="/gallery">Open gallery</a>
           </div>
         </div>
         <div class="hero-meta card">
@@ -31,9 +43,16 @@
       <main class="layout">
         <section class="calendar-panel card">
           <div class="panel-header">
-            <div>
-              <p class="meta-label">Month view</p>
-              <h2 id="month-label">Loading...</h2>
+            <div class="panel-heading">
+              <span class="panel-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" role="presentation" focusable="false">
+                  <path d="M7 2a1 1 0 0 1 1 1v1h8V3a1 1 0 1 1 2 0v1h1a3 3 0 0 1 3 3v11a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V7a3 3 0 0 1 3-3h1V3a1 1 0 0 1 1-1Zm13 8H4v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8ZM5 6a1 1 0 0 0-1 1v1h16V7a1 1 0 0 0-1-1H5Zm2 6h3v3H7v-3Zm5 0h3v3h-3v-3Zm5 0h3v3h-3v-3Z"></path>
+                </svg>
+              </span>
+              <div class="panel-heading-text">
+                <p class="meta-label">Month view</p>
+                <h2 id="month-label">Loading...</h2>
+              </div>
             </div>
             <div class="month-actions">
               <button id="prev-month" class="icon-button" type="button" aria-label="Previous month">&larr;</button>
@@ -47,6 +66,17 @@
         </section>
 
         <aside class="sidebar">
+          <section class="card">
+            <div class="panel-header tight">
+              <div>
+                <p class="meta-label">Bulletin board</p>
+                <h2>House messages</h2>
+              </div>
+              <button id="open-bulletin-modal" class="button button-secondary" type="button">Post message</button>
+            </div>
+            <div id="bulletin-list" class="stack"></div>
+          </section>
+
           <section class="card day-panel">
             <div class="panel-header tight">
               <div>
@@ -193,6 +223,57 @@
         <div class="modal-actions">
           <button class="button button-secondary" type="button" data-close-dialog="member-modal">Cancel</button>
           <button class="button button-primary" type="submit">Add member</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="bulletin-modal" class="modal">
+      <form id="bulletin-form" class="modal-form">
+        <div class="modal-header">
+          <div>
+            <p class="meta-label">Bulletin board</p>
+            <h2 id="bulletin-modal-title">Post message</h2>
+          </div>
+          <button id="close-bulletin-modal" class="icon-button" type="button" aria-label="Close">&times;</button>
+        </div>
+
+        <label>
+          Title
+          <input name="title" type="text" maxlength="120" required />
+        </label>
+
+        <div class="split-fields">
+          <label>
+            Posted by
+            <input name="author" type="text" maxlength="80" placeholder="Jody, Mom, House note..." />
+          </label>
+          <label>
+            Tone
+            <select name="tone">
+              <option>Note</option>
+              <option>Reminder</option>
+              <option>Alert</option>
+              <option>Heads-up</option>
+            </select>
+          </label>
+        </div>
+
+        <label class="checkbox-field">
+          <input name="pinned" type="checkbox" />
+          Pin to top
+        </label>
+
+        <label>
+          Message
+          <textarea name="message" rows="5" maxlength="1000" required></textarea>
+        </label>
+
+        <p id="bulletin-form-error" class="form-error" hidden></p>
+
+        <div class="modal-actions">
+          <button id="delete-bulletin" class="button button-danger" type="button" hidden>Delete</button>
+          <button class="button button-secondary" type="button" data-close-dialog="bulletin-modal">Cancel</button>
+          <button class="button button-primary" type="submit">Save message</button>
         </div>
       </form>
     </dialog>

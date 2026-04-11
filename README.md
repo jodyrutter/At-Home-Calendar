@@ -6,6 +6,8 @@ Hearthboard is a self-hosted household calendar and scheduling board you can run
 
 - Shared month-view calendar with a focused day agenda
 - Upcoming event rail for quick planning
+- Bulletin board for household notes, reminders, and alerts
+- Separate read-only gallery page backed by local media folders
 - Household member roster with per-person filtering
 - Event creation, editing, and deletion
 - Persistent local storage backed by a JSON data file in a Docker volume
@@ -53,11 +55,20 @@ Calendar data is stored in the named Docker volume `hearthboard-data`. If you wa
 - `POST /api/events`
 - `PATCH /api/events/:eventId`
 - `DELETE /api/events/:eventId`
+- `POST /api/bulletins`
+- `PATCH /api/bulletins/:bulletinId`
+- `DELETE /api/bulletins/:bulletinId`
+- `GET /api/media/libraries`
+- `GET /api/media/browse`
+- `GET /api/media/search`
+- `GET /media/:library/...`
 
 ## Notes
 
 - The app seeds a few starter household members and events the first time it boots so the board is not empty.
 - Update `HOUSEHOLD_NAME` and `APP_TIMEZONE` in [docker-compose.yml](C:\Users\jody4\OneDrive\Documents\New project\docker-compose.yml) if you want different defaults.
+- The Docker setup mounts `E:\Drone` into the container as a read-only media library and exposes it on the Gallery page.
+- To add future libraries like Japan or general photos, add another read-only bind mount plus another entry in `MEDIA_LIBRARY_ROOTS`.
 - Use [start-hearthboard.ps1](C:\Users\jody4\OneDrive\Documents\New project\scripts\start-hearthboard.ps1) and [stop-hearthboard.ps1](C:\Users\jody4\OneDrive\Documents\New project\scripts\stop-hearthboard.ps1) if you want simple Windows-friendly launch commands.
 - To install automatic startup at Windows sign-in, run [install-hearthboard-autostart.ps1](C:\Users\jody4\OneDrive\Documents\New project\scripts\install-hearthboard-autostart.ps1).
 - To remove automatic startup later, run [uninstall-hearthboard-autostart.ps1](C:\Users\jody4\OneDrive\Documents\New project\scripts\uninstall-hearthboard-autostart.ps1).

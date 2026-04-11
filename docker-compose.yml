@@ -11,8 +11,13 @@ services:
       DATA_DIR: /app/data
       APP_TIMEZONE: America/Port-au-Prince
       HOUSEHOLD_NAME: Hearthboard Household
+      MEDIA_LIBRARY_ROOTS: '[{"id":"drone","label":"Drone pictures","path":"/libraries/drone"}]'
     volumes:
       - hearthboard-data:/app/data
+      - type: bind
+        source: E:/Drone
+        target: /libraries/drone
+        read_only: true
     restart: unless-stopped
 
 volumes:
