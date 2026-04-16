@@ -11,6 +11,11 @@ services:
       DATA_DIR: /app/data
       APP_TIMEZONE: America/Port-au-Prince
       HOUSEHOLD_NAME: Hearthboard Household
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      OLLAMA_MODEL: hearthboard-assistant
+      OLLAMA_FALLBACK_MODEL: qwen2.5:7b
+      OLLAMA_KEEP_ALIVE: "0"
+      OLLAMA_TIMEOUT_MS: 120000
       MEDIA_LIBRARY_ROOTS: '[{"id":"drone","label":"Drone pictures","path":"/libraries/drone"},{"id":"japan","label":"Japan","path":"/libraries/japan"},{"id":"general","label":"General","path":"/libraries/general","excludePaths":["Pretty Pictures"]}]'
     volumes:
       - hearthboard-data:/app/data

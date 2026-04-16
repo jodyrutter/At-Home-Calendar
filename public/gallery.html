@@ -5,6 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Hearthboard Gallery</title>
     <meta name="theme-color" content="#dd6b20" />
+    <script>
+      (() => {
+        const savedTheme = localStorage.getItem("hearthboard-theme");
+        const preferredDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.dataset.theme = savedTheme || (preferredDark ? "dark" : "light");
+      })();
+    </script>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="shortcut icon" href="/favicon.svg" />
     <link rel="stylesheet" href="/styles.css" />
@@ -13,9 +20,19 @@
     <div class="page-shell">
       <nav class="site-nav card" aria-label="Primary">
         <a class="nav-brand" href="/">Hearthboard</a>
-        <div class="nav-links">
-          <a class="nav-link" href="/">Calendar</a>
-          <a class="nav-link is-active" href="/gallery">Gallery</a>
+        <div class="nav-tools">
+          <div class="nav-links">
+            <a class="nav-link" href="/">Calendar</a>
+            <a class="nav-link is-active" href="/gallery">Gallery</a>
+            <a class="nav-link" href="/assistant">Jody AI</a>
+          </div>
+          <label class="theme-toggle" aria-label="Toggle dark mode">
+            <span class="theme-toggle-copy">Night mode</span>
+            <input class="theme-toggle-input" type="checkbox" data-theme-toggle />
+            <span class="theme-toggle-track" aria-hidden="true">
+              <span class="theme-toggle-thumb"></span>
+            </span>
+          </label>
         </div>
       </nav>
 
@@ -76,6 +93,7 @@
           </div>
 
           <div id="media-grid" class="media-grid"></div>
+          <div id="gallery-pagination" class="gallery-pagination"></div>
         </section>
       </main>
     </div>
@@ -100,6 +118,7 @@
       </div>
     </template>
 
+    <script type="module" src="/theme.js"></script>
     <script type="module" src="/gallery.js"></script>
   </body>
 </html>

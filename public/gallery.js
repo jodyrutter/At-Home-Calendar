@@ -8,7 +8,14 @@ const state = {
   searchQuery: "",
   searchResults: [],
   activeType: "all",
-  truncated: false
+  currentPage: 1,
+  pageSize: 48,
+  totalPages: 1,
+  totalMatches: 0,
+  hasPreviousPage: false,
+  hasNextPage: false,
+  rangeStart: 0,
+  rangeEnd: 0
 };
 
 const elements = {
@@ -22,6 +29,7 @@ const elements = {
   breadcrumbs: document.querySelector("#breadcrumbs"),
   typeFilters: document.querySelector("#type-filters"),
   mediaGrid: document.querySelector("#media-grid"),
+  pagination: document.querySelector("#gallery-pagination"),
   viewerModal: document.querySelector("#viewer-modal"),
   viewerTitle: document.querySelector("#viewer-title"),
   viewerMeta: document.querySelector("#viewer-meta"),
@@ -35,6 +43,12 @@ const mediaTypeLabels = {
   video: "Videos",
   panorama: "Panoramas",
   raw: "RAW"
+};
+
+const videoQualityLabels = {
+  auto: "Auto",
+  original: "Original",
+  p720: "720p"
 };
 
 function debounce(fn, delay) {
@@ -77,16 +91,70 @@ function formatTimestamp(value) {
   }).format(new Date(value));
 }
 
+function autoVideoQualityPreference() {
+  const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+  const saveData = Boolean(connection?.saveData);
+  const effectiveType = String(connection?.effectiveType || "").toLowerCase();
+  const weakConnection = ["slow-2g", "2g", "3g"].includes(effectiveType);
+  const lowMemory = Number.isFinite(navigator.deviceMemory) && navigator.deviceMemory <= 4;
+  const lowCpu = Number.isFinite(navigator.hardwareConcurrency) && navigator.hardwareConcurrency <= 4;
+
+  return saveData || weakConnection || lowMemory || lowCpu ? "p720" : "original";
+}
+
+function videoSourceForQuality(file, quality) {
+  if (quality === "p720" && file.videoVariants?.p720) {
+    return file.videoVariants.p720;
+  }
+
+  return file.videoVariants?.original || file.url;
+}
+
+async function getVideoProxyStatus(file, quality) {
+  const payload = await api(
+    `/api/media/video-proxy-status?library=${encodeURIComponent(state.activeLibraryId)}&path=${encodeURIComponent(file.path)}&quality=${encodeURIComponent(quality)}`
+  );
+  return Boolean(payload.ready);
+}
+
+async function prepareVideoProxy(file, quality) {
+  const response = await fetch("/api/media/video-proxy", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      library: state.activeLibraryId,
+      path: file.path,
+      quality
+    })
+  });
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.error || "Could not prepare video proxy.");
+  }
+
+  return response.json();
+}
+
 function activeLibrary() {
   return state.libraries.find((library) => library.id === state.activeLibraryId) || null;
 }
 
 function activeFiles() {
-  const source = state.searchQuery.trim() ? state.searchResults : state.files;
-  if (state.activeType === "all") {
-    return source;
-  }
-  return source.filter((file) => file.mediaType === state.activeType);
+  return state.searchQuery.trim() ? state.searchResults : state.files;
+}
+
+function updatePagination(pagination) {
+  state.currentPage = pagination?.currentPage || 1;
+  state.pageSize = pagination?.pageSize || state.pageSize;
+  state.totalPages = pagination?.totalPages || 1;
+  state.totalMatches = pagination?.totalMatches || 0;
+  state.hasPreviousPage = Boolean(pagination?.hasPreviousPage);
+  state.hasNextPage = Boolean(pagination?.hasNextPage);
+  state.rangeStart = pagination?.totalMatches ? (pagination.startIndex || 0) + 1 : 0;
+  state.rangeEnd = pagination?.endIndex || 0;
 }
 
 async function loadLibraries() {
@@ -105,31 +173,47 @@ async function loadLibraries() {
   await browseLibrary("");
 }
 
-async function browseLibrary(relativePath) {
-  const payload = await api(`/api/media/browse?library=${encodeURIComponent(state.activeLibraryId)}&path=${encodeURIComponent(relativePath)}&type=${encodeURIComponent(state.activeType)}`);
+async function browseLibrary(relativePath, page = 1) {
+  const payload = await api(`/api/media/browse?library=${encodeURIComponent(state.activeLibraryId)}&path=${encodeURIComponent(relativePath)}&type=${encodeURIComponent(state.activeType)}&page=${encodeURIComponent(page)}&pageSize=${encodeURIComponent(state.pageSize)}`);
   state.currentPath = payload.currentPath;
   state.breadcrumbs = payload.breadcrumbs;
   state.directories = payload.directories;
   state.files = payload.files;
-  state.truncated = Boolean(payload.truncated);
+  updatePagination(payload.pagination);
   state.searchResults = [];
   state.searchQuery = "";
   elements.searchInput.value = "";
   render();
 }
 
-async function searchLibrary(query) {
+async function searchLibrary(query, page = 1) {
   state.searchQuery = query.trim();
   if (!state.searchQuery) {
     state.searchResults = [];
+    state.currentPage = 1;
+    state.totalPages = 1;
+    state.totalMatches = state.files.length;
+    state.hasPreviousPage = false;
+    state.hasNextPage = false;
+    state.rangeStart = state.files.length ? 1 : 0;
+    state.rangeEnd = state.files.length;
     render();
     return;
   }
 
-  const payload = await api(`/api/media/search?library=${encodeURIComponent(state.activeLibraryId)}&path=${encodeURIComponent(state.currentPath)}&q=${encodeURIComponent(state.searchQuery)}&type=${encodeURIComponent(state.activeType)}`);
+  const payload = await api(`/api/media/search?library=${encodeURIComponent(state.activeLibraryId)}&path=${encodeURIComponent(state.currentPath)}&q=${encodeURIComponent(state.searchQuery)}&type=${encodeURIComponent(state.activeType)}&page=${encodeURIComponent(page)}&pageSize=${encodeURIComponent(state.pageSize)}`);
   state.searchResults = payload.results || [];
-  state.truncated = Boolean(payload.truncated);
+  updatePagination(payload.pagination);
   render();
+}
+
+async function loadPage(page) {
+  if (state.searchQuery.trim()) {
+    await searchLibrary(state.searchQuery, page);
+    return;
+  }
+
+  await browseLibrary(state.currentPath, page);
 }
 
 function render() {
@@ -139,6 +223,7 @@ function render() {
   renderBreadcrumbs();
   renderTypeFilters();
   renderMediaGrid();
+  renderPagination();
 }
 
 function renderHeader() {
@@ -161,19 +246,20 @@ function renderHeader() {
       <span>Folders in this view</span>
     </div>
     <div class="summary-card">
-      <strong>${visibleFiles.length}</strong>
-      <span>Visible media items</span>
+      <strong>${state.totalMatches}</strong>
+      <span>Matching media items</span>
     </div>
   `;
 
+  const rangeText = state.totalMatches === 0
+    ? "No matching media yet"
+    : `Showing ${state.rangeStart}-${state.rangeEnd} of ${state.totalMatches}`;
   const statusBase = state.searchQuery
-    ? `${state.searchResults.length} match${state.searchResults.length === 1 ? "" : "es"} in the current scope`
+    ? `${rangeText} search match${state.totalMatches === 1 ? "" : "es"} in the current scope`
     : state.currentPath
-      ? `Showing media from this folder and its subfolders`
-      : "Showing media from the whole library";
-  elements.searchStatus.textContent = state.truncated
-    ? `${statusBase}. Results are capped to keep the page fast.`
-    : statusBase;
+      ? `${rangeText} from this folder and its subfolders`
+      : `${rangeText} from the whole library`;
+  elements.searchStatus.textContent = statusBase;
 }
 
 function renderLibraryTabs() {
@@ -194,7 +280,7 @@ function renderLibraryTabs() {
     button.addEventListener("click", async () => {
       state.activeLibraryId = library.id;
       state.activeType = "all";
-      await browseLibrary("");
+      await browseLibrary("", 1);
     });
     elements.libraryTabs.append(button);
   });
@@ -207,7 +293,7 @@ function renderFolders() {
   rootButton.type = "button";
   rootButton.className = "folder-link";
   rootButton.innerHTML = "<span>Whole library</span><span>&uarr;</span>";
-  rootButton.addEventListener("click", () => browseLibrary(""));
+  rootButton.addEventListener("click", () => browseLibrary("", 1));
   elements.folderList.append(rootButton);
 
   if (state.directories.length === 0) {
@@ -220,7 +306,7 @@ function renderFolders() {
     button.type = "button";
     button.className = "folder-link";
     button.innerHTML = `<span>${directory.name}</span><span>&rsaquo;</span>`;
-    button.addEventListener("click", () => browseLibrary(directory.path));
+    button.addEventListener("click", () => browseLibrary(directory.path, 1));
     elements.folderList.append(button);
   });
 }
@@ -232,7 +318,7 @@ function renderBreadcrumbs() {
     button.type = "button";
     button.className = "breadcrumb-button";
     button.textContent = crumb.name;
-    button.addEventListener("click", () => browseLibrary(crumb.path));
+    button.addEventListener("click", () => browseLibrary(crumb.path, 1));
     elements.breadcrumbs.append(button);
   });
 }
@@ -248,9 +334,9 @@ function renderTypeFilters() {
     button.addEventListener("click", async () => {
       state.activeType = type;
       if (state.searchQuery.trim()) {
-        await searchLibrary(state.searchQuery);
+        await searchLibrary(state.searchQuery, 1);
       } else {
-        await browseLibrary(state.currentPath);
+        await browseLibrary(state.currentPath, 1);
       }
     });
     elements.typeFilters.append(button);
@@ -271,6 +357,50 @@ function renderMediaGrid() {
   });
 }
 
+function renderPagination() {
+  elements.pagination.innerHTML = "";
+
+  if (state.totalMatches === 0) {
+    return;
+  }
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "gallery-pagination-bar";
+
+  const status = document.createElement("p");
+  status.className = "gallery-pagination-status";
+  status.textContent = `Page ${state.currentPage} of ${state.totalPages}`;
+
+  const controls = document.createElement("div");
+  controls.className = "gallery-pagination-controls";
+
+  const previousButton = document.createElement("button");
+  previousButton.type = "button";
+  previousButton.className = "button button-secondary pagination-button";
+  previousButton.textContent = "Previous";
+  previousButton.disabled = !state.hasPreviousPage;
+  previousButton.addEventListener("click", () => {
+    loadPage(state.currentPage - 1).catch((error) => {
+      elements.searchStatus.textContent = error.message;
+    });
+  });
+
+  const nextButton = document.createElement("button");
+  nextButton.type = "button";
+  nextButton.className = "button button-secondary pagination-button";
+  nextButton.textContent = "Next";
+  nextButton.disabled = !state.hasNextPage;
+  nextButton.addEventListener("click", () => {
+    loadPage(state.currentPage + 1).catch((error) => {
+      elements.searchStatus.textContent = error.message;
+    });
+  });
+
+  controls.append(previousButton, nextButton);
+  wrapper.append(status, controls);
+  elements.pagination.append(wrapper);
+}
+
 function mediaCard(file) {
   const article = document.createElement("article");
   article.className = "media-card";
@@ -286,10 +416,15 @@ function mediaCard(file) {
   const thumbButton = article.querySelector(".media-card-thumb");
   if (file.mediaType === "image") {
     const image = document.createElement("img");
-    image.src = file.url;
+    image.src = file.thumbnailUrl || file.url;
     image.alt = file.name;
     image.loading = "lazy";
     image.decoding = "async";
+    image.addEventListener("error", () => {
+      if (image.src !== file.url) {
+        image.src = file.url;
+      }
+    });
     thumbButton.append(image);
   } else if (file.mediaType === "video") {
     const frame = document.createElement("div");
@@ -342,11 +477,117 @@ function openViewer(file) {
     image.alt = file.name;
     elements.viewerBody.append(image);
   } else if (file.mediaType === "video") {
+    const preferredQuality = autoVideoQualityPreference();
+    const qualityWrap = document.createElement("div");
+    qualityWrap.className = "video-quality-bar";
+
+    const qualityLabel = document.createElement("label");
+    qualityLabel.className = "video-quality-label";
+    qualityLabel.textContent = "Playback quality";
+
+    const qualitySelect = document.createElement("select");
+    qualitySelect.className = "video-quality-select";
+    ["auto", "original", "p720"].forEach((quality) => {
+      const option = document.createElement("option");
+      option.value = quality;
+      option.textContent = videoQualityLabels[quality];
+      qualitySelect.append(option);
+    });
+    qualitySelect.value = preferredQuality === "p720" ? "auto" : "original";
+
     const video = document.createElement("video");
-    video.src = file.url;
     video.controls = true;
     video.preload = "metadata";
+
+    const qualityHint = document.createElement("span");
+    qualityHint.className = "video-quality-hint";
+    qualityHint.textContent = "Preparing playback...";
+
+    const download = document.createElement("a");
+    download.className = "button button-secondary viewer-download";
+    download.target = "_blank";
+    download.rel = "noopener";
+    download.textContent = "Open in new tab";
+
+    const applyVideoSource = (requestedQuality, sourceUrl, hintText) => {
+      const currentTime = video.currentTime;
+      const wasPaused = video.paused;
+      const normalizedSource = new URL(sourceUrl, window.location.origin).href;
+
+      if (video.currentSrc === normalizedSource || video.src === normalizedSource) {
+        qualityHint.textContent = hintText;
+        download.href = sourceUrl;
+        return;
+      }
+
+      video.src = sourceUrl;
+      download.href = sourceUrl;
+      qualityHint.textContent = hintText;
+      video.load();
+      video.addEventListener(
+        "loadedmetadata",
+        () => {
+          if (Number.isFinite(currentTime)) {
+            try {
+              video.currentTime = currentTime;
+            } catch {}
+          }
+          if (!wasPaused) {
+            video.play().catch(() => {});
+          }
+        },
+        { once: true }
+      );
+    };
+
+    const chooseVideoQuality = async (selection) => {
+      if (selection === "original") {
+        applyVideoSource("original", videoSourceForQuality(file, "original"), "Playing the original video.");
+        return;
+      }
+
+      if (selection === "p720") {
+        const ready = await getVideoProxyStatus(file, "720p").catch(() => false);
+        if (ready) {
+          applyVideoSource("p720", videoSourceForQuality(file, "p720"), "Playing the cached 720p version.");
+          return;
+        }
+
+        applyVideoSource("original", videoSourceForQuality(file, "original"), "Preparing the 720p version in the background. Still playing the original for now.");
+        prepareVideoProxy(file, "720p").catch(() => {});
+        return;
+      }
+
+      const autoQuality = autoVideoQualityPreference();
+      if (autoQuality === "p720") {
+        const ready = await getVideoProxyStatus(file, "720p").catch(() => false);
+        if (ready) {
+          applyVideoSource("p720", videoSourceForQuality(file, "p720"), "Auto selected 720p for this device or connection.");
+          return;
+        }
+
+        applyVideoSource("original", videoSourceForQuality(file, "original"), "Auto prefers 720p here, but it is still preparing. Playing original for now.");
+        prepareVideoProxy(file, "720p").catch(() => {});
+        return;
+      }
+
+      applyVideoSource("original", videoSourceForQuality(file, "original"), "Auto selected original quality for this device.");
+    };
+
+    qualitySelect.addEventListener("change", () => {
+      chooseVideoQuality(qualitySelect.value).catch((error) => {
+        qualityHint.textContent = error.message;
+      });
+    });
+
+    qualityLabel.append(qualitySelect);
+    qualityWrap.append(qualityLabel, qualityHint);
+    elements.viewerBody.append(qualityWrap);
     elements.viewerBody.append(video);
+    elements.viewerBody.append(download);
+    chooseVideoQuality(qualitySelect.value).catch((error) => {
+      qualityHint.textContent = error.message;
+    });
   } else if (file.mediaType === "panorama") {
     const iframe = document.createElement("iframe");
     iframe.src = file.url;
@@ -360,19 +601,21 @@ function openViewer(file) {
     elements.viewerBody.append(placeholder);
   }
 
-  const download = document.createElement("a");
-  download.className = "button button-secondary viewer-download";
-  download.href = file.url;
-  download.target = "_blank";
-  download.rel = "noopener";
-  download.textContent = file.mediaType === "raw" ? "Open file" : "Open in new tab";
-  elements.viewerBody.append(download);
+  if (file.mediaType !== "video") {
+    const download = document.createElement("a");
+    download.className = "button button-secondary viewer-download";
+    download.href = file.url;
+    download.target = "_blank";
+    download.rel = "noopener";
+    download.textContent = file.mediaType === "raw" ? "Open file" : "Open in new tab";
+    elements.viewerBody.append(download);
+  }
   elements.viewerModal.showModal();
 }
 
 function bindEvents() {
   const debouncedSearch = debounce((value) => {
-    searchLibrary(value).catch((error) => {
+    searchLibrary(value, 1).catch((error) => {
       elements.searchStatus.textContent = error.message;
     });
   }, 250);

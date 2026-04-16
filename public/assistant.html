@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Jody AI</title>
+    <meta name="theme-color" content="#dd6b20" />
+    <script>
+      (() => {
+        const savedTheme = localStorage.getItem("hearthboard-theme");
+        const preferredDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.dataset.theme = savedTheme || (preferredDark ? "dark" : "light");
+      })();
+    </script>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="shortcut icon" href="/favicon.svg" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <nav class="site-nav card" aria-label="Primary">
+        <a class="nav-brand" href="/">Hearthboard</a>
+        <div class="nav-tools">
+          <div class="nav-links">
+            <a class="nav-link" href="/">Calendar</a>
+            <a class="nav-link" href="/gallery">Gallery</a>
+            <a class="nav-link is-active" href="/assistant">Jody AI</a>
+          </div>
+          <label class="theme-toggle" aria-label="Toggle dark mode">
+            <span class="theme-toggle-copy">Night mode</span>
+            <input class="theme-toggle-input" type="checkbox" data-theme-toggle />
+            <span class="theme-toggle-track" aria-hidden="true">
+              <span class="theme-toggle-thumb"></span>
+            </span>
+          </label>
+        </div>
+      </nav>
+
+      <header class="hero hero-assistant">
+        <div class="hero-copy">
+          <p class="eyebrow">Local AI, on demand</p>
+          <h1>Jody AI</h1>
+          <p class="hero-text">
+            Your private local AI for this machine. You can wake it from this page when you want it, put it back to sleep when you are done, and keep it from lingering on your GPU while you are gaming.
+          </p>
+          <div class="hero-actions">
+            <button id="assistant-refresh" class="button button-secondary" type="button">Refresh status</button>
+            <button id="assistant-clear" class="button button-secondary" type="button">New chat</button>
+          </div>
+        </div>
+        <div class="hero-meta card">
+          <p class="meta-label">Recommended fit</p>
+          <h2>Qwen 2.5 7B</h2>
+          <p class="muted">
+            Tuned for your current PC class: an instruction-style 7B model, fast enough to be useful locally without pushing past the comfortable edge of an 8 GB GPU setup.
+          </p>
+          <div class="summary-cards">
+            <div class="summary-card">
+              <strong>7.62B</strong>
+              <span>Model size</span>
+            </div>
+            <div class="summary-card">
+              <strong>4.7 GB</strong>
+              <span>Q4 model blob</span>
+            </div>
+            <div class="summary-card">
+              <strong>On demand</strong>
+              <span>Can sleep on command</span>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main class="assistant-layout">
+        <section class="assistant-main card">
+          <div class="panel-header tight">
+            <div>
+              <p class="meta-label">Conversation</p>
+              <h2>Talk with Jody AI</h2>
+            </div>
+            <div id="assistant-busy" class="assistant-busy" hidden>Thinking...</div>
+          </div>
+
+          <div id="assistant-chat" class="assistant-chat" aria-live="polite"></div>
+
+          <form id="assistant-form" class="assistant-form">
+            <label class="assistant-prompt-label" for="assistant-prompt">
+              <span class="meta-label">Prompt</span>
+              <textarea
+                id="assistant-prompt"
+                name="prompt"
+                rows="4"
+                maxlength="4000"
+                placeholder="Ask Jody AI for writing help, planning, brainstorming, summaries, or a second opinion."
+                required
+              ></textarea>
+            </label>
+
+            <div class="assistant-form-actions">
+              <p class="muted assistant-footnote">
+                Jody AI checks its status when this page loads. It does not stay loaded in memory unless you wake it up.
+              </p>
+              <button id="assistant-submit" class="button button-primary" type="submit">Send</button>
+            </div>
+          </form>
+        </section>
+
+        <aside class="assistant-sidebar">
+          <section class="card assistant-status-card">
+            <div class="panel-header tight">
+              <div>
+                <p class="meta-label">Runtime</p>
+                <h2>Jody AI status</h2>
+              </div>
+            </div>
+            <div id="assistant-status"></div>
+          </section>
+
+          <section class="card assistant-help-card">
+            <div class="panel-header tight">
+              <div>
+                <p class="meta-label">Setup</p>
+                <h2>When you are ready</h2>
+              </div>
+            </div>
+            <p class="muted">
+              I left the heavy part as a one-command setup so we do not start pulling multi-gigabyte model files while you are in a match.
+            </p>
+            <div class="assistant-code-block">
+              <code>.\scripts\setup-hearthboard-ai.ps1</code>
+            </div>
+            <p class="muted">
+              Under the hood, Jody AI looks for a custom local model named <code>hearthboard-assistant</code>, and falls back to <code>qwen2.5:7b</code> if that custom alias has not been created yet.
+            </p>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <template id="assistant-empty-state-template">
+      <div class="empty-state assistant-empty-state">
+        <p>Jody AI is ready for its first question.</p>
+        <div class="assistant-suggestions">
+          <button class="button button-secondary assistant-suggestion" type="button" data-suggestion="Help me plan the rest of this week.">
+            Plan my week
+          </button>
+          <button class="button button-secondary assistant-suggestion" type="button" data-suggestion="Draft a warm message I can post on the household bulletin board.">
+            Draft a bulletin
+          </button>
+          <button class="button button-secondary assistant-suggestion" type="button" data-suggestion="Give me three dinner ideas I can make tonight.">
+            Dinner ideas
+          </button>
+        </div>
+      </div>
+    </template>
+
+    <script type="module" src="/theme.js"></script>
+    <script type="module" src="/assistant.js"></script>
+  </body>
+</html>
