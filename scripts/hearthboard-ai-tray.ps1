@@ -114,10 +114,9 @@ function Invoke-LocalAiApi {
 function Get-StatusSnapshot {
   try {
     $status = Invoke-LocalAiApi -Method GET -Uri $statusEndpoint
-    $status | Add-Member -NotePropertyName appReachable -NotePropertyValue $true -Force
-    return $status
+    return (Normalize-StatusSnapshot -Status $status)
   } catch {
-    return [pscustomobject]@{
+    return (Normalize-StatusSnapshot -Status ([pscustomobject]@{
       name = "Jody AI"
       appReachable = $false
       reachable = $false
@@ -125,8 +124,22 @@ function Get-StatusSnapshot {
       loaded = $false
       localAiAllowed = $true
       error = "Hearthboard is unavailable right now."
-    }
+    }))
   }
+}
+
+function Normalize-StatusSnapshot {
+  param([object]$Status)
+
+  if ($null -eq $Status) {
+    $Status = [pscustomobject]@{}
+  }
+
+  if (-not $Status.PSObject.Properties.Match("appReachable").Count) {
+    $Status | Add-Member -NotePropertyName appReachable -NotePropertyValue $true -Force
+  }
+
+  return $Status
 }
 
 $icons = @{
@@ -158,6 +171,7 @@ $script:lastStatus = $null
 function Update-TrayVisual {
   param([object]$Status)
 
+  $Status = Normalize-StatusSnapshot -Status $Status
   $script:lastStatus = $Status
   $title = if ($Status.name) { [string]$Status.name } else { "Jody AI" }
   $appReachable = $Status.appReachable -ne $false
