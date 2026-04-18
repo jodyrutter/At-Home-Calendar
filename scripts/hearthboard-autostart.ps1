@@ -80,3 +80,15 @@ try {
 } catch {
   Write-Log "Could not launch the Hearthboard AI tray."
 }
+
+try {
+  Start-Process -FilePath "powershell.exe" -ArgumentList @(
+    "-NoProfile",
+    "-WindowStyle", "Hidden",
+    "-ExecutionPolicy", "Bypass",
+    "-File", (Join-Path $projectRoot "scripts\power-mode-idle-manager.ps1")
+  ) | Out-Null
+  Write-Log "Power mode idle manager was launched."
+} catch {
+  Write-Log "Could not launch the power mode idle manager."
+}
