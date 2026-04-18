@@ -1,0 +1,30 @@
+{
+	admin off
+	default_sni {$HEARTHBOARD_DEFAULT_SNI:localhost}
+
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+(hearthboard_common) {
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
+		Referrer-Policy no-referrer
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+	}
+
+	reverse_proxy hearthboard:42069
+}
+
+{$HEARTHBOARD_LOCAL_SITE_ADDRESSES:localhost 127.0.0.1 192.168.1.118} {
+	tls internal
+	import hearthboard_common
+}
+
+{$HEARTHBOARD_PUBLIC_DOMAIN:jodyrutter-sh.duckdns.org} {
+	import hearthboard_common
+}

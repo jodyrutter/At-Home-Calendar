@@ -15,13 +15,18 @@ const state = {
   hasPreviousPage: false,
   hasNextPage: false,
   rangeStart: 0,
-  rangeEnd: 0
+  rangeEnd: 0,
+  lockedLibraryCount: 0,
+  authenticated: false,
+  user: null,
+  isAdmin: false
 };
 
 const elements = {
   libraryLabel: document.querySelector("#gallery-library-label"),
   pathLabel: document.querySelector("#gallery-path-label"),
   summary: document.querySelector("#gallery-summary"),
+  privateAlbums: document.querySelector("#gallery-private-albums"),
   libraryTabs: document.querySelector("#library-tabs"),
   searchInput: document.querySelector("#gallery-search"),
   searchStatus: document.querySelector("#search-status"),
@@ -68,6 +73,21 @@ async function api(path) {
   return response.json();
 }
 
+async function postApi(path, payload) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || "Request failed.");
+  }
+  return data;
+}
+
 function formatBytes(value) {
   if (value < 1024) {
     return `${value} B`;
@@ -89,6 +109,11 @@ function formatTimestamp(value) {
     hour: "numeric",
     minute: "2-digit"
   }).format(new Date(value));
+}
+
+function formatViewCount(value) {
+  const count = Math.max(0, Number.parseInt(String(value || "0"), 10) || 0);
+  return `${count} view${count === 1 ? "" : "s"}`;
 }
 
 function autoVideoQualityPreference() {
@@ -160,13 +185,17 @@ function updatePagination(pagination) {
 async function loadLibraries() {
   const payload = await api("/api/media/libraries");
   state.libraries = payload.libraries || [];
+  state.lockedLibraryCount = payload.lockedLibraryCount || 0;
+  state.authenticated = Boolean(payload.authenticated);
+  state.user = payload.user || null;
+  state.isAdmin = state.user?.role === "admin";
 
   if (state.libraries.length === 0) {
     render();
     return;
   }
 
-  if (!state.activeLibraryId) {
+  if (!state.activeLibraryId || !state.libraries.some((library) => library.id === state.activeLibraryId)) {
     state.activeLibraryId = state.libraries[0].id;
   }
 
@@ -219,6 +248,7 @@ async function loadPage(page) {
 function render() {
   renderHeader();
   renderLibraryTabs();
+  renderPrivateAlbumsNotice();
   renderFolders();
   renderBreadcrumbs();
   renderTypeFilters();
@@ -284,6 +314,37 @@ function renderLibraryTabs() {
     });
     elements.libraryTabs.append(button);
   });
+}
+
+function renderPrivateAlbumsNotice() {
+  if (!elements.privateAlbums) {
+    return;
+  }
+
+  const shouldShow = state.lockedLibraryCount > 0;
+  elements.privateAlbums.hidden = !shouldShow;
+  if (!shouldShow) {
+    return;
+  }
+
+  const copy = elements.privateAlbums.querySelector(".empty-state-copy");
+  const link = elements.privateAlbums.querySelector("a");
+  if (!copy || !link) {
+    return;
+  }
+
+  if (!state.authenticated) {
+    copy.textContent = "Some albums are hidden until you sign in.";
+    link.textContent = "Sign in";
+    link.href = "/login?next=%2Fgallery";
+    return;
+  }
+
+  copy.textContent = state.isAdmin
+    ? "Some albums are still hidden because their current visibility rules do not include this view."
+    : "Some albums are reserved for the admin account or a different access level.";
+  link.textContent = "Open account";
+  link.href = "/account";
 }
 
 function renderFolders() {
@@ -409,7 +470,7 @@ function mediaCard(file) {
     <div>
       <h3 class="media-card-title">${file.name}</h3>
       <p class="media-card-meta">${file.path}</p>
-      <p class="media-card-meta">${mediaTypeLabels[file.mediaType] || file.mediaType} | ${formatBytes(file.size)} | ${formatTimestamp(file.modifiedAt)}</p>
+      <p class="media-card-meta">${mediaTypeLabels[file.mediaType] || file.mediaType} | ${formatBytes(file.size)} | ${formatTimestamp(file.modifiedAt)} | ${formatViewCount(file.viewCount)}</p>
     </div>
   `;
 
@@ -466,9 +527,65 @@ function emptyStateNode(message) {
   return node;
 }
 
+async function quarantineFile(file) {
+  const confirmed = window.confirm(`Send ${file.name} to quarantine? It will disappear from the main gallery until you restore it manually.`);
+  if (!confirmed) {
+    return;
+  }
+
+  try {
+    await postApi("/api/media/quarantine", {
+      library: state.activeLibraryId,
+      path: file.path
+    });
+    elements.viewerModal.close();
+    elements.searchStatus.textContent = `${file.name} was moved to quarantine.`;
+    await loadPage(state.currentPage);
+  } catch (error) {
+    elements.searchStatus.textContent = error.message;
+  }
+}
+
+async function moveFileToLibrary(file, targetLibraryId) {
+  if (!targetLibraryId) {
+    elements.searchStatus.textContent = "Choose a destination gallery first.";
+    return;
+  }
+
+  try {
+    const payload = await postApi("/api/media/move", {
+      sourceLibrary: state.activeLibraryId,
+      targetLibrary: targetLibraryId,
+      path: file.path
+    });
+    elements.viewerModal.close();
+    const targetLabel = state.libraries.find((library) => library.id === payload.targetLibrary)?.label || payload.targetLibrary;
+    elements.searchStatus.textContent = `${file.name} was moved to ${targetLabel}.`;
+    await loadLibraries();
+  } catch (error) {
+    elements.searchStatus.textContent = error.message;
+  }
+}
+
+async function registerMediaView(file, updateMeta) {
+  try {
+    const payload = await postApi("/api/media/view", {
+      library: state.activeLibraryId,
+      path: file.path
+    });
+    file.viewCount = payload.viewCount;
+    file.lastViewedAt = payload.lastViewedAt;
+    updateMeta();
+    renderMediaGrid();
+  } catch {}
+}
+
 function openViewer(file) {
   elements.viewerTitle.textContent = file.name;
-  elements.viewerMeta.textContent = `${file.path} | ${mediaTypeLabels[file.mediaType] || file.mediaType} | ${formatBytes(file.size)} | ${formatTimestamp(file.modifiedAt)}`;
+  const updateViewerMeta = () => {
+    elements.viewerMeta.textContent = `${file.path} | ${mediaTypeLabels[file.mediaType] || file.mediaType} | ${formatBytes(file.size)} | ${formatTimestamp(file.modifiedAt)} | ${formatViewCount(file.viewCount)}`;
+  };
+  updateViewerMeta();
   elements.viewerBody.innerHTML = "";
 
   if (file.mediaType === "image") {
@@ -610,7 +727,67 @@ function openViewer(file) {
     download.textContent = file.mediaType === "raw" ? "Open file" : "Open in new tab";
     elements.viewerBody.append(download);
   }
+
+  const library = activeLibrary();
+  if (library?.canQuarantine || (library?.canMoveMedia && Array.isArray(library.moveTargets) && library.moveTargets.length > 0)) {
+    const actionRow = document.createElement("div");
+    actionRow.className = "viewer-actions";
+
+    const note = document.createElement("p");
+    note.className = "viewer-action-note";
+    note.textContent = "Admin actions are permanent file moves, so Hearthboard only shows the safe destinations available from this machine.";
+
+    if (library?.canMoveMedia && Array.isArray(library.moveTargets) && library.moveTargets.length > 0) {
+      const moveWrap = document.createElement("div");
+      moveWrap.className = "viewer-move-row";
+
+      const moveSelect = document.createElement("select");
+      moveSelect.className = "viewer-move-select";
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "Move to gallery...";
+      moveSelect.append(placeholder);
+
+      library.moveTargets.forEach((target) => {
+        const option = document.createElement("option");
+        option.value = target.id;
+        option.textContent = target.label;
+        moveSelect.append(option);
+      });
+
+      const moveButton = document.createElement("button");
+      moveButton.type = "button";
+      moveButton.className = "button button-secondary";
+      moveButton.textContent = "Move";
+      moveButton.addEventListener("click", () => {
+        moveFileToLibrary(file, moveSelect.value).catch((error) => {
+          elements.searchStatus.textContent = error.message;
+        });
+      });
+
+      moveWrap.append(moveSelect, moveButton);
+      actionRow.append(moveWrap);
+    }
+
+    if (library?.canQuarantine) {
+      const quarantineButton = document.createElement("button");
+      quarantineButton.type = "button";
+      quarantineButton.className = "button button-danger viewer-quarantine";
+      quarantineButton.textContent = "Send to quarantine";
+      quarantineButton.addEventListener("click", () => {
+        quarantineFile(file).catch((error) => {
+          elements.searchStatus.textContent = error.message;
+        });
+      });
+      actionRow.append(quarantineButton);
+    }
+
+    actionRow.append(note);
+    elements.viewerBody.append(actionRow);
+  }
+
   elements.viewerModal.showModal();
+  registerMediaView(file, updateViewerMeta).catch(() => {});
 }
 
 function bindEvents() {

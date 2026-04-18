@@ -29,10 +29,8 @@ const elements = {
   memberList: document.querySelector("#member-list"),
   eventModal: document.querySelector("#event-modal"),
   bulletinModal: document.querySelector("#bulletin-modal"),
-  memberModal: document.querySelector("#member-modal"),
   eventForm: document.querySelector("#event-form"),
   bulletinForm: document.querySelector("#bulletin-form"),
-  memberForm: document.querySelector("#member-form"),
   eventModalTitle: document.querySelector("#event-modal-title"),
   bulletinModalTitle: document.querySelector("#bulletin-modal-title"),
   deleteEvent: document.querySelector("#delete-event"),
@@ -40,7 +38,6 @@ const elements = {
   memberCheckboxes: document.querySelector("#member-checkboxes"),
   eventFormError: document.querySelector("#event-form-error"),
   bulletinFormError: document.querySelector("#bulletin-form-error"),
-  memberFormError: document.querySelector("#member-form-error"),
   emptyStateTemplate: document.querySelector("#empty-state-template")
 };
 
@@ -361,7 +358,7 @@ function renderMembers() {
     article.className = "member-card";
     article.innerHTML = `
       <h3><span class="member-swatch" style="background:${member.color}"></span>${member.name}</h3>
-      <p>${member.role || "No role note yet."}</p>
+      <p>${member.role || (member.username ? `@${member.username}` : "Household account")}</p>
       <p>${assignments} scheduled item${assignments === 1 ? "" : "s"}</p>
     `;
     elements.memberList.append(article);
@@ -593,29 +590,6 @@ async function handleEventSubmit(event) {
   }
 }
 
-async function handleMemberSubmit(event) {
-  event.preventDefault();
-  elements.memberFormError.hidden = true;
-
-  const formData = new FormData(elements.memberForm);
-  const payload = {
-    name: formData.get("name"),
-    role: formData.get("role"),
-    color: formData.get("color")
-  };
-
-  try {
-    await api("/api/members", { method: "POST", body: JSON.stringify(payload) });
-    elements.memberForm.reset();
-    elements.memberForm.elements.color.value = "#2563eb";
-    await loadBoard();
-    closeModal(elements.memberModal);
-  } catch (error) {
-    elements.memberFormError.textContent = error.message;
-    elements.memberFormError.hidden = false;
-  }
-}
-
 async function handleBulletinSubmit(event) {
   event.preventDefault();
   elements.bulletinFormError.hidden = true;
@@ -679,13 +653,8 @@ function bindEvents() {
     state.visibleMonth = new Date(state.visibleMonth.getFullYear(), state.visibleMonth.getMonth() + 1, 1);
     render();
   });
-  document.querySelector("#open-member-modal").addEventListener("click", () => {
-    elements.memberFormError.hidden = true;
-    elements.memberModal.showModal();
-  });
   document.querySelector("#close-event-modal").addEventListener("click", () => closeModal(elements.eventModal));
   document.querySelector("#close-bulletin-modal").addEventListener("click", () => closeModal(elements.bulletinModal));
-  document.querySelector("#close-member-modal").addEventListener("click", () => closeModal(elements.memberModal));
   document.querySelectorAll("[data-close-dialog]").forEach((button) => {
     button.addEventListener("click", () => {
       closeModal(document.querySelector(`#${button.dataset.closeDialog}`));
@@ -694,7 +663,6 @@ function bindEvents() {
 
   elements.eventForm.addEventListener("submit", handleEventSubmit);
   elements.bulletinForm.addEventListener("submit", handleBulletinSubmit);
-  elements.memberForm.addEventListener("submit", handleMemberSubmit);
   elements.eventForm.elements.allDay.addEventListener("change", toggleTimeFields);
   elements.deleteEvent.addEventListener("click", async () => {
     try {

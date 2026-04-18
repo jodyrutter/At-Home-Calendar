@@ -53,6 +53,12 @@ if (-not (Wait-ForDocker)) {
 }
 
 Set-Location $projectRoot
+try {
+  & (Join-Path $projectRoot "scripts\update-hearthboard-env.ps1") | Out-Null
+  Write-Log "Refreshed Hearthboard HTTPS host settings."
+} catch {
+  Write-Log "Could not refresh Hearthboard HTTPS host settings automatically."
+}
 
 try {
   docker compose up -d | Out-Null

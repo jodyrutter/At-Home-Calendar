@@ -3,20 +3,20 @@ services:
     build:
       context: .
     container_name: hearthboard
-    ports:
-      - "42069:42069"
     environment:
       HOST: 0.0.0.0
       PORT: 42069
       DATA_DIR: /app/data
       APP_TIMEZONE: America/Port-au-Prince
       HOUSEHOLD_NAME: Hearthboard Household
+      TRUST_PROXY_HEADERS: "true"
       OLLAMA_BASE_URL: http://host.docker.internal:11434
       OLLAMA_MODEL: hearthboard-assistant
       OLLAMA_FALLBACK_MODEL: qwen2.5:7b
       OLLAMA_KEEP_ALIVE: "0"
+      OLLAMA_AWAKE_KEEP_ALIVE: 5m
       OLLAMA_TIMEOUT_MS: 120000
-      MEDIA_LIBRARY_ROOTS: '[{"id":"drone","label":"Drone pictures","path":"/libraries/drone"},{"id":"japan","label":"Japan","path":"/libraries/japan"},{"id":"general","label":"General","path":"/libraries/general","excludePaths":["Pretty Pictures"]}]'
+      MEDIA_LIBRARY_ROOTS: '[{"id":"drone","label":"Drone pictures","path":"/libraries/drone"},{"id":"japan","label":"Japan","path":"/libraries/japan","writable":true},{"id":"general","label":"General","path":"/libraries/general","excludePaths":["Pretty Pictures"],"writable":true},{"id":"phone","label":"Phone","path":"/libraries/phone","authMode":"always","quarantinePath":"/libraries/phone-quarantine","writable":true}]'
     volumes:
       - hearthboard-data:/app/data
       - type: bind
@@ -26,12 +26,36 @@ services:
       - type: bind
         source: D:/Home/Japan-photos
         target: /libraries/japan
-        read_only: true
       - type: bind
         source: D:/Home/Pictures
         target: /libraries/general
-        read_only: true
+      - type: bind
+        source: D:/Home/Phone-photos
+        target: /libraries/phone
+      - type: bind
+        source: D:/Home/Phone-photos-Quarantine
+        target: /libraries/phone-quarantine
+    restart: unless-stopped
+  caddy:
+    image: caddy:2.10-alpine
+    container_name: hearthboard-caddy
+    depends_on:
+      - hearthboard
+    ports:
+      - "80:80"
+      - "443:443"
+      - "42069:443"
+    environment:
+      HEARTHBOARD_LOCAL_SITE_ADDRESSES: "${HEARTHBOARD_LOCAL_SITE_ADDRESSES:-localhost 127.0.0.1 192.168.1.118}"
+      HEARTHBOARD_PUBLIC_DOMAIN: "${HEARTHBOARD_PUBLIC_DOMAIN:-jodyrutter-sh.duckdns.org}"
+      HEARTHBOARD_DEFAULT_SNI: "${HEARTHBOARD_DEFAULT_SNI:-192.168.1.118}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
     restart: unless-stopped
 
 volumes:
   hearthboard-data:
+  caddy-data:
+  caddy-config:

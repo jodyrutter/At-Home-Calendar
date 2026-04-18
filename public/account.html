@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hearthboard Account</title>
+    <meta name="theme-color" content="#dd6b20" />
+    <script>
+      (() => {
+        const savedTheme = localStorage.getItem("hearthboard-theme");
+        const preferredDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.dataset.theme = savedTheme || (preferredDark ? "dark" : "light");
+      })();
+    </script>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="shortcut icon" href="/favicon.svg" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <nav class="site-nav card" aria-label="Primary">
+        <a class="nav-brand" href="/">Hearthboard</a>
+        <div class="nav-tools">
+          <div class="nav-links">
+            <a class="nav-link" href="/">Calendar</a>
+            <a class="nav-link" href="/gallery">Gallery</a>
+            <a class="nav-link" href="/assistant">Jody AI</a>
+            <a class="nav-link is-active" href="/account">Account</a>
+          </div>
+          <label class="theme-toggle" aria-label="Toggle dark mode">
+            <span class="theme-toggle-copy">Night mode</span>
+            <input class="theme-toggle-input" type="checkbox" data-theme-toggle />
+            <span class="theme-toggle-track" aria-hidden="true">
+              <span class="theme-toggle-thumb"></span>
+            </span>
+          </label>
+        </div>
+      </nav>
+
+      <header class="hero hero-account">
+        <div class="hero-copy">
+          <p class="eyebrow">Your account</p>
+          <h1 id="account-heading">Loading account...</h1>
+          <p id="account-subtitle" class="hero-text">
+            Update your password, phone number, email, and admin controls from one place.
+          </p>
+          <div class="hero-actions">
+            <button id="account-refresh" class="button button-secondary" type="button">Refresh</button>
+            <button id="account-logout" class="button button-secondary" type="button">Log out</button>
+          </div>
+        </div>
+        <div class="hero-meta card">
+          <p class="meta-label">Signed in as</p>
+          <h2 id="account-username">...</h2>
+          <p id="account-role" class="muted"></p>
+          <div id="account-summary" class="summary-cards"></div>
+        </div>
+      </header>
+
+      <main class="account-layout">
+        <section class="card account-panel">
+          <div class="panel-header tight">
+            <div>
+              <p class="meta-label">Profile</p>
+              <h2>Contact details</h2>
+            </div>
+          </div>
+          <form id="profile-form" class="assistant-form">
+            <label class="assistant-prompt-label" for="profile-email">
+              <span class="meta-label">Email</span>
+              <input id="profile-email" name="email" type="email" autocomplete="email" />
+            </label>
+            <label class="assistant-prompt-label" for="profile-phone">
+              <span class="meta-label">Phone</span>
+              <input id="profile-phone" name="phone" type="tel" autocomplete="tel" />
+            </label>
+            <p id="profile-error" class="form-error" hidden></p>
+            <p id="profile-success" class="form-success" hidden></p>
+            <div class="assistant-form-actions">
+              <span class="muted">Leave a field blank if you do not want it saved.</span>
+              <button class="button button-primary" type="submit">Save profile</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="card account-panel">
+          <div class="panel-header tight">
+            <div>
+              <p class="meta-label">Security</p>
+              <h2>Reset password</h2>
+            </div>
+          </div>
+          <form id="password-form" class="assistant-form">
+            <label class="assistant-prompt-label" for="current-password">
+              <span class="meta-label">Current password</span>
+              <input id="current-password" name="currentPassword" type="password" autocomplete="current-password" required />
+            </label>
+            <label class="assistant-prompt-label" for="new-password">
+              <span class="meta-label">New password</span>
+              <input id="new-password" name="newPassword" type="password" autocomplete="new-password" required />
+            </label>
+            <label class="assistant-prompt-label" for="confirm-password">
+              <span class="meta-label">Confirm new password</span>
+              <input id="confirm-password" name="confirmPassword" type="password" autocomplete="new-password" required />
+            </label>
+            <p id="password-error" class="form-error" hidden></p>
+            <p id="password-success" class="form-success" hidden></p>
+            <div class="assistant-form-actions">
+              <span class="muted">Passwords need at least 8 characters.</span>
+              <button class="button button-primary" type="submit">Update password</button>
+            </div>
+          </form>
+        </section>
+
+        <section id="admin-panel" class="card account-panel" hidden>
+          <div class="panel-header tight">
+            <div>
+              <p class="meta-label">Admin control panel</p>
+              <h2>Visibility and device history</h2>
+            </div>
+          </div>
+          <div class="account-tab-row" role="tablist" aria-label="Admin sections">
+            <button class="button button-secondary account-tab is-active" type="button" data-admin-tab="visibility">Visibility</button>
+            <button class="button button-secondary account-tab" type="button" data-admin-tab="users">Users</button>
+            <button class="button button-secondary account-tab" type="button" data-admin-tab="devices">Devices</button>
+          </div>
+
+          <section class="admin-tab-panel" data-admin-panel="visibility">
+            <p class="muted">
+              Choose who can open each page or gallery on LAN and over the internet. Admin-only media actions live inside the gallery viewer.
+            </p>
+
+            <form id="visibility-form" class="assistant-form">
+              <div>
+                <h3 class="account-section-title">Pages</h3>
+                <div id="page-visibility-grid" class="visibility-grid"></div>
+              </div>
+
+              <div>
+                <h3 class="account-section-title">Galleries</h3>
+                <div id="library-visibility-grid" class="visibility-grid"></div>
+              </div>
+
+              <p id="visibility-error" class="form-error" hidden></p>
+              <p id="visibility-success" class="form-success" hidden></p>
+              <div class="assistant-form-actions">
+                <span class="muted">`public` is open, `trusted` includes trusted friends and up, `family` is for household members, and `admin` is only for you.</span>
+                <button class="button button-primary" type="submit">Save visibility</button>
+              </div>
+            </form>
+          </section>
+
+          <section class="admin-tab-panel" data-admin-panel="users" hidden>
+            <p class="muted">
+              Approve new accounts, choose what they can open, and decide whether they belong on the household calendar roster.
+            </p>
+            <div id="user-list" class="user-list"></div>
+          </section>
+
+          <section class="admin-tab-panel" data-admin-panel="devices" hidden>
+            <p class="muted">
+              Hearthboard keeps a rolling log of devices that reached the site so you can spot what has connected, from where, and whether it ever authenticated.
+            </p>
+            <div id="device-list" class="device-list"></div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/theme.js"></script>
+    <script type="module" src="/account.js"></script>
+  </body>
+</html>

@@ -1,3 +1,7 @@
 node_modules/
 data/store.json
 *.log
+.env
+.venv-phone-clean/
+local-certs/
+logs/

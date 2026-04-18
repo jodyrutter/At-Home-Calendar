@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hearthboard Access</title>
+    <meta name="theme-color" content="#dd6b20" />
+    <script>
+      (() => {
+        const savedTheme = localStorage.getItem("hearthboard-theme");
+        const preferredDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.dataset.theme = savedTheme || (preferredDark ? "dark" : "light");
+      })();
+    </script>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="shortcut icon" href="/favicon.svg" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <nav class="site-nav card" aria-label="Primary">
+        <a class="nav-brand" href="/">Hearthboard</a>
+        <div class="nav-tools">
+          <div class="nav-links">
+            <a class="nav-link" href="/">Calendar</a>
+            <a class="nav-link" href="/gallery">Gallery</a>
+            <a class="nav-link" href="/assistant">Jody AI</a>
+          </div>
+          <label class="theme-toggle" aria-label="Toggle dark mode">
+            <span class="theme-toggle-copy">Night mode</span>
+            <input class="theme-toggle-input" type="checkbox" data-theme-toggle />
+            <span class="theme-toggle-track" aria-hidden="true">
+              <span class="theme-toggle-thumb"></span>
+            </span>
+          </label>
+        </div>
+      </nav>
+
+      <main class="access-layout">
+        <section class="card access-card">
+          <p class="meta-label">Protected access</p>
+          <h1>Protected page</h1>
+          <p id="access-copy" class="hero-text">
+            Enter your configured remote-access password to continue.
+          </p>
+
+          <form id="access-form" class="assistant-form">
+            <label class="assistant-prompt-label" for="access-password">
+              <span class="meta-label">Password</span>
+              <input id="access-password" name="password" type="password" autocomplete="current-password" required />
+            </label>
+            <p id="access-error" class="form-error" hidden></p>
+            <div class="assistant-form-actions">
+              <a class="button button-secondary" href="/gallery">Open Gallery Instead</a>
+              <button class="button button-primary" type="submit">Unlock</button>
+            </div>
+          </form>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/theme.js"></script>
+    <script type="module" src="/access.js"></script>
+  </body>
+</html>

@@ -25,6 +25,7 @@
             <a class="nav-link" href="/">Calendar</a>
             <a class="nav-link" href="/gallery">Gallery</a>
             <a class="nav-link is-active" href="/assistant">Jody AI</a>
+            <a class="nav-link" href="/account">Account</a>
           </div>
           <label class="theme-toggle" aria-label="Toggle dark mode">
             <span class="theme-toggle-copy">Night mode</span>
@@ -96,9 +97,14 @@
               ></textarea>
             </label>
 
+            <label class="assistant-web-toggle">
+              <input id="assistant-use-web" name="useWeb" type="checkbox" />
+              <span>Use web search for this reply</span>
+            </label>
+
             <div class="assistant-form-actions">
               <p class="muted assistant-footnote">
-                Jody AI checks its status when this page loads. It does not stay loaded in memory unless you wake it up.
+                Jody AI checks its status when this page loads. Web search stays off unless you explicitly turn it on, and the model auto-sleeps after 5 minutes of inactivity.
               </p>
               <button id="assistant-submit" class="button button-primary" type="submit">Send</button>
             </div>
@@ -116,7 +122,7 @@
             <div id="assistant-status"></div>
           </section>
 
-          <section class="card assistant-help-card">
+          <section id="assistant-help-card" class="card assistant-help-card" hidden>
             <div class="panel-header tight">
               <div>
                 <p class="meta-label">Setup</p>
