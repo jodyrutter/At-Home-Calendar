@@ -45,6 +45,10 @@ async function api(path, options = {}) {
 }
 
 function statusLabel(status) {
+  if (status?.localAiAllowed === false) {
+    return "Restricted";
+  }
+
   if (!status?.reachable) {
     return "Offline";
   }
@@ -84,12 +88,14 @@ function renderStatus() {
     elements.helpCard.hidden = Boolean(status.ready);
   }
 
-  const pillState = !status.reachable ? "offline" : status.ready && status.loaded ? "ready" : "waiting";
+  const pillState = status.localAiAllowed === false ? "offline" : !status.reachable ? "offline" : status.ready && status.loaded ? "ready" : "waiting";
   const activeModel = status.activeModel || "Not installed yet";
   const loadedModel = status.loadedModel || "Sleeping";
   const webSearch = status.webSearch || { enabled: false, provider: "none", mode: "off" };
   const awakeKeepAlive = status.awakeKeepAlive || "5m";
-  const detail = !status.reachable
+  const detail = status.localAiAllowed === false
+    ? `${assistantName} is restricted on this PC right now, so it cannot start or wake, even for signed-in users, until it is allowed again.`
+    : !status.reachable
     ? `${assistantName} is offline on this PC right now.`
     : !status.ready
       ? `${assistantName} can see the local runtime, but the recommended model is not installed yet.`
@@ -106,7 +112,7 @@ function renderStatus() {
   const errorMarkup = status.error ? `<p class="form-error">${escapeHtml(status.error)}</p>` : "";
   const powerButtonLabel = status.loaded ? `Put ${assistantName} to sleep` : `Wake ${assistantName}`;
   const powerButtonAction = status.loaded ? "sleep" : "wake";
-  const powerButtonDisabled = !status.reachable || !status.ready || state.busy ? "disabled" : "";
+  const powerButtonDisabled = !status.reachable || !status.ready || state.busy || status.localAiAllowed === false ? "disabled" : "";
 
   elements.status.innerHTML = `
     <div class="assistant-status-shell">
@@ -145,6 +151,10 @@ function renderStatus() {
           <strong>${escapeHtml(String(awakeKeepAlive))}</strong>
         </div>
         <div class="assistant-status-row">
+          <span>Local AI policy</span>
+          <strong>${status.localAiAllowed === false ? "Restricted" : "Allowed"}</strong>
+        </div>
+        <div class="assistant-status-row">
           <span>Known local models</span>
           <strong>${escapeHtml(String(status.availableModels?.length || 0))}</strong>
         </div>
@@ -157,6 +167,8 @@ function renderStatus() {
   elements.status.querySelector("[data-power-action]")?.addEventListener("click", async () => {
     await togglePower(powerButtonAction);
   });
+
+  setBusy(state.busy);
 }
 
 function renderSources(container, sources) {
@@ -229,12 +241,13 @@ function renderChat() {
 
 function setBusy(nextBusy) {
   state.busy = nextBusy;
-  elements.submit.disabled = nextBusy;
-  elements.prompt.disabled = nextBusy;
+  const restricted = state.status?.localAiAllowed === false;
+  elements.submit.disabled = nextBusy || restricted;
+  elements.prompt.disabled = nextBusy || restricted;
   elements.refreshButton.disabled = nextBusy;
   elements.clearButton.disabled = nextBusy;
   if (elements.useWeb) {
-    elements.useWeb.disabled = nextBusy;
+    elements.useWeb.disabled = nextBusy || restricted;
   }
   elements.busy.hidden = !nextBusy;
 }
@@ -252,6 +265,7 @@ async function loadStatus() {
       fallbackModel: "qwen2.5:7b",
       keepAlive: "0",
       availableModels: [],
+      localAiAllowed: true,
       webSearch: {
         enabled: false,
         provider: "none",
@@ -291,6 +305,7 @@ async function togglePower(action) {
         fallbackModel: "qwen2.5:7b",
         keepAlive: "0",
         availableModels: [],
+        localAiAllowed: true,
         webSearch: {
           enabled: false,
           provider: "none",

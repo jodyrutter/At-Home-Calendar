@@ -49,6 +49,12 @@ const ADMIN_USERNAME = "jodyrutter";
 const VISIBILITY_OPTIONS = new Set(["public", "trusted", "family", "admin"]);
 const PERMISSION_LEVELS = ["default", "trusted", "family", "admin"];
 const PAGE_KEYS = ["calendar", "gallery", "assistant"];
+const VISIBILITY_RANKS = new Map([
+  ["public", 0],
+  ["trusted", 1],
+  ["family", 2],
+  ["admin", 3]
+]);
 const ASSISTANT_SYSTEM_PROMPT =
   String(process.env.ASSISTANT_SYSTEM_PROMPT || "").trim() ||
   [
@@ -145,6 +151,11 @@ function defaultData() {
       users: [],
       sessions: [],
       devices: [],
+      localAi: {
+        allowed: true,
+        updatedAt: null,
+        updatedBy: null
+      },
       pageVisibility: defaultPageVisibility(),
       libraryVisibility: defaultLibraryVisibility()
     }
@@ -190,6 +201,19 @@ function normalizeVisibilityRule(rule, fallbackRule) {
   return {
     lan: normalizeVisibilityLevel(rule.lan, fallback.lan),
     remote: normalizeVisibilityLevel(rule.remote, fallback.remote)
+  };
+}
+
+function visibilityLevelRank(value) {
+  return VISIBILITY_RANKS.get(normalizeVisibilityLevel(value, "public")) ?? 0;
+}
+
+function clampVisibilityRule(rule, minimumRule) {
+  const normalizedRule = normalizeVisibilityRule(rule, minimumRule);
+  const minimum = normalizeVisibilityRule(minimumRule, minimumRule);
+  return {
+    lan: visibilityLevelRank(normalizedRule.lan) < visibilityLevelRank(minimum.lan) ? minimum.lan : normalizedRule.lan,
+    remote: visibilityLevelRank(normalizedRule.remote) < visibilityLevelRank(minimum.remote) ? minimum.remote : normalizedRule.remote
   };
 }
 
@@ -243,12 +267,29 @@ if (!Array.isArray(db.data.security.devices)) {
   db.data.security.devices = [];
 }
 
+if (!db.data.security.localAi || typeof db.data.security.localAi !== "object") {
+  db.data.security.localAi = {
+    allowed: true,
+    updatedAt: null,
+    updatedBy: null
+  };
+}
+
+const localAiWasRestrictedOnBoot = db.data.security.localAi.allowed === false;
+db.data.security.localAi.allowed = true;
+if (localAiWasRestrictedOnBoot) {
+  db.data.security.localAi.updatedAt = new Date().toISOString();
+  db.data.security.localAi.updatedBy = "startup";
+}
+db.data.security.localAi.updatedAt = db.data.security.localAi.updatedAt || null;
+db.data.security.localAi.updatedBy = db.data.security.localAi.updatedBy || null;
+
 if (!db.data.security.pageVisibility || typeof db.data.security.pageVisibility !== "object") {
   db.data.security.pageVisibility = defaultPageVisibility();
 }
 
 for (const pageKey of PAGE_KEYS) {
-  db.data.security.pageVisibility[pageKey] = normalizeVisibilityRule(db.data.security.pageVisibility[pageKey], defaultPageVisibility()[pageKey]);
+  db.data.security.pageVisibility[pageKey] = clampVisibilityRule(db.data.security.pageVisibility[pageKey], defaultPageVisibility()[pageKey]);
 }
 
 if (!db.data.security.libraryVisibility || typeof db.data.security.libraryVisibility !== "object") {
@@ -1180,9 +1221,27 @@ function visibilityLevelAllows(level, user) {
   return userVisibilityRank(user) >= 1;
 }
 
+function localAiPolicy() {
+  return {
+    allowed: db.data.security?.localAi?.allowed !== false,
+    updatedAt: db.data.security?.localAi?.updatedAt || null,
+    updatedBy: db.data.security?.localAi?.updatedBy || null
+  };
+}
+
+async function updateLocalAiPolicy(allowed, updatedBy = null) {
+  db.data.security.localAi = {
+    allowed: allowed !== false,
+    updatedAt: new Date().toISOString(),
+    updatedBy: updatedBy || null
+  };
+  await db.write();
+  return localAiPolicy();
+}
+
 function pageVisibility(pageKey) {
   const defaults = defaultPageVisibility();
-  return normalizeVisibilityRule(db.data.security.pageVisibility?.[pageKey], defaults[pageKey]);
+  return clampVisibilityRule(db.data.security.pageVisibility?.[pageKey], defaults[pageKey]);
 }
 
 function libraryVisibility(library) {
@@ -1703,6 +1762,7 @@ function buildWebSearchPrompt(query, searchContext) {
 }
 
 async function readAssistantRuntimeStatus() {
+  const policy = localAiPolicy();
   try {
     const [tagsResponse, psResponse] = await Promise.all([
       fetchOllama("/api/tags"),
@@ -1731,6 +1791,8 @@ async function readAssistantRuntimeStatus() {
         loadedModel: null,
         keepAlive: OLLAMA_KEEP_ALIVE,
         awakeKeepAlive: OLLAMA_AWAKE_KEEP_ALIVE,
+        localAiAllowed: policy.allowed,
+        localAiPolicy: policy,
         webSearch: webSearchStatus(),
         error: errorMessage
       };
@@ -1769,6 +1831,8 @@ async function readAssistantRuntimeStatus() {
       runningModels,
       keepAlive: OLLAMA_KEEP_ALIVE,
       awakeKeepAlive: OLLAMA_AWAKE_KEEP_ALIVE,
+      localAiAllowed: policy.allowed,
+      localAiPolicy: policy,
       webSearch: webSearchStatus(),
       error: activeModel ? null : `No compatible local model found yet. Run .\\scripts\\setup-hearthboard-ai.ps1 after installing Ollama.`
     };
@@ -1786,6 +1850,8 @@ async function readAssistantRuntimeStatus() {
       runningModels: [],
       keepAlive: OLLAMA_KEEP_ALIVE,
       awakeKeepAlive: OLLAMA_AWAKE_KEEP_ALIVE,
+      localAiAllowed: policy.allowed,
+      localAiPolicy: policy,
       webSearch: webSearchStatus(),
       error: `Could not reach Ollama at ${OLLAMA_BASE_URL}.`
     };
@@ -1793,6 +1859,13 @@ async function readAssistantRuntimeStatus() {
 }
 
 async function setAssistantPower(action, runtimeStatus) {
+  if (action === "wake" && !localAiPolicy().allowed) {
+    return {
+      error: `${JODY_AI_NAME} is currently restricted on this PC.`,
+      status: 423
+    };
+  }
+
   if (!runtimeStatus.reachable) {
     return { error: `${JODY_AI_NAME} is offline on this PC right now.`, status: 503 };
   }
@@ -2653,7 +2726,7 @@ app.get("/api/account", (request, response) => {
   response.json({
     user: userSummary(user),
     isAdmin: user.role === "admin",
-    pageVisibility: user.role === "admin" ? db.data.security.pageVisibility : null,
+    pageVisibility: user.role === "admin" ? Object.fromEntries(PAGE_KEYS.map((pageKey) => [pageKey, pageVisibility(pageKey)])) : null,
     libraryVisibility: user.role === "admin"
       ? Object.fromEntries(mediaLibraries.map((library) => [library.id, libraryVisibility(library)]))
       : null,
@@ -2740,9 +2813,9 @@ app.patch("/api/admin/visibility", async (request, response) => {
 
   if (nextPages && typeof nextPages === "object") {
     for (const pageKey of PAGE_KEYS) {
-      db.data.security.pageVisibility[pageKey] = normalizeVisibilityRule(
+      db.data.security.pageVisibility[pageKey] = clampVisibilityRule(
         nextPages[pageKey],
-        pageVisibility(pageKey)
+        defaultPageVisibility()[pageKey]
       );
     }
   }
@@ -2759,7 +2832,7 @@ app.patch("/api/admin/visibility", async (request, response) => {
   await db.write();
   return response.json({
     ok: true,
-    pageVisibility: db.data.security.pageVisibility,
+    pageVisibility: Object.fromEntries(PAGE_KEYS.map((pageKey) => [pageKey, pageVisibility(pageKey)])),
     libraryVisibility: Object.fromEntries(mediaLibraries.map((library) => [library.id, libraryVisibility(library)]))
   });
 });
@@ -3012,6 +3085,39 @@ app.post("/api/media/view", async (request, response) => {
   });
 });
 
+app.get("/api/local-ai/status", async (request, response) => {
+  if (!requestIsLocalMachine(request)) {
+    return response.status(403).json({ error: "This control is only available from this PC." });
+  }
+
+  response.json(await readAssistantRuntimeStatus());
+});
+
+app.post("/api/local-ai/policy", async (request, response) => {
+  if (!requestIsLocalMachine(request)) {
+    return response.status(403).json({ error: "This control is only available from this PC." });
+  }
+
+  const allowed = normalizeBoolean(request.body?.allowed);
+  const policy = await updateLocalAiPolicy(allowed, "local-tray");
+  let status = await readAssistantRuntimeStatus();
+
+  if (!policy.allowed && status.loaded) {
+    const sleepResult = await setAssistantPower("sleep", status);
+    if (sleepResult.ok) {
+      status = await waitForAssistantLoadedState(false);
+    } else {
+      status = await readAssistantRuntimeStatus();
+    }
+  }
+
+  return response.json({
+    ok: true,
+    policy,
+    status
+  });
+});
+
 app.get("/api/assistant/status", async (_request, response) => {
   response.json(await readAssistantRuntimeStatus());
 });
@@ -3044,6 +3150,12 @@ app.post("/api/assistant/chat", async (request, response) => {
   }
 
   const runtimeStatus = await readAssistantRuntimeStatus();
+  if (!runtimeStatus.localAiAllowed) {
+    return response.status(423).json({
+      error: "Jody AI is currently restricted on this PC."
+    });
+  }
+
   if (!runtimeStatus.reachable) {
     return response.status(503).json({
       error: runtimeStatus.error || "Local AI runtime is not reachable right now."

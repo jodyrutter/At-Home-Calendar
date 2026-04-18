@@ -68,3 +68,15 @@ try {
   docker compose up --build -d | Out-Null
   Write-Log "Hearthboard started after rebuild."
 }
+
+try {
+  Start-Process -FilePath "powershell.exe" -ArgumentList @(
+    "-NoProfile",
+    "-WindowStyle", "Hidden",
+    "-ExecutionPolicy", "Bypass",
+    "-File", (Join-Path $projectRoot "scripts\hearthboard-ai-tray.ps1")
+  ) | Out-Null
+  Write-Log "Hearthboard AI tray was launched."
+} catch {
+  Write-Log "Could not launch the Hearthboard AI tray."
+}

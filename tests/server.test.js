@@ -459,6 +459,76 @@ test("assistant status reports fallback model readiness through Ollama", async (
   assert.equal(payload.fallbackModel, "qwen2.5:7b");
 });
 
+test("assistant stays behind login even if legacy visibility was saved as public", async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "hearthboard-"));
+  await writeFile(
+    path.join(dataDir, "store.json"),
+    JSON.stringify(
+      {
+        householdName: "Test House",
+        timezone: "America/Port-au-Prince",
+        members: [{ id: "seed-jody", name: "Jody", role: "", color: "#2473eb" }],
+        events: [],
+        bulletins: [],
+        mediaViews: {},
+        security: {
+          remoteAccess: {
+            passwordHash: null,
+            protectedPages: {
+              calendar: true,
+              assistant: true,
+              gallery: false
+            }
+          },
+          users: [],
+          sessions: [],
+          devices: [],
+          localAi: {
+            allowed: true,
+            updatedAt: null,
+            updatedBy: null
+          },
+          pageVisibility: {
+            calendar: { lan: "public", remote: "public" },
+            gallery: { lan: "public", remote: "public" },
+            assistant: { lan: "public", remote: "public" }
+          },
+          libraryVisibility: {}
+        }
+      },
+      null,
+      2
+    )
+  );
+
+  const port = 42129;
+  const server = spawn(process.execPath, ["server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: "127.0.0.1",
+      DATA_DIR: dataDir
+    },
+    stdio: "inherit"
+  });
+
+  t.after(() => {
+    server.kill();
+  });
+
+  await waitForServer(port);
+
+  const pageResponse = await fetch(`http://127.0.0.1:${port}/assistant`, {
+    redirect: "manual"
+  });
+  assert.equal(pageResponse.status, 302);
+  assert.match(String(pageResponse.headers.get("location") || ""), /^\/login\?next=/);
+
+  const apiResponse = await fetch(`http://127.0.0.1:${port}/api/assistant/status`);
+  assert.equal(apiResponse.status, 401);
+});
+
 test("assistant can be woken and put to sleep from the web API", async (t) => {
   const dataDir = await mkdtemp(path.join(tmpdir(), "hearthboard-"));
   const fakeOllama = await startFakeOllama({ models: ["qwen2.5:7b"], delayedUnloadMs: 300 });
@@ -514,6 +584,146 @@ test("assistant can be woken and put to sleep from the web API", async (t) => {
   const sleepPayload = await sleepResponse.json();
   assert.equal(sleepPayload.status.loaded, false);
   assert.equal(fakeOllama.lastGenerateRequest().keep_alive, 0);
+});
+
+test("local AI policy can restrict wakeups from the local tray endpoint", async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "hearthboard-"));
+  const fakeOllama = await startFakeOllama({ models: ["qwen2.5:7b"] });
+  const port = 42130;
+  const server = spawn(process.execPath, ["server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: "127.0.0.1",
+      DATA_DIR: dataDir,
+      OLLAMA_BASE_URL: fakeOllama.baseUrl,
+      OLLAMA_MODEL: "hearthboard-assistant",
+      OLLAMA_FALLBACK_MODEL: "qwen2.5:7b",
+      OLLAMA_KEEP_ALIVE: "0"
+    },
+    stdio: "inherit"
+  });
+
+  t.after(async () => {
+    server.kill();
+    await fakeOllama.close();
+  });
+
+  await waitForServer(port);
+  const adminCookie = await setAdminPasswordAndLogin(`http://127.0.0.1:${port}`);
+
+  const wakeResponse = await fetch(`http://127.0.0.1:${port}/api/assistant/power`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: adminCookie
+    },
+    body: JSON.stringify({ action: "wake" })
+  });
+  assert.equal(wakeResponse.status, 200);
+
+  const restrictResponse = await fetch(`http://127.0.0.1:${port}/api/local-ai/policy`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ allowed: false })
+  });
+  assert.equal(restrictResponse.status, 200);
+  const restrictPayload = await restrictResponse.json();
+  assert.equal(restrictPayload.policy.allowed, false);
+  assert.equal(restrictPayload.status.localAiAllowed, false);
+  assert.equal(restrictPayload.status.loaded, false);
+  assert.equal(fakeOllama.lastGenerateRequest().keep_alive, 0);
+
+  const blockedWake = await fetch(`http://127.0.0.1:${port}/api/assistant/power`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: adminCookie
+    },
+    body: JSON.stringify({ action: "wake" })
+  });
+  assert.equal(blockedWake.status, 423);
+
+  const allowResponse = await fetch(`http://127.0.0.1:${port}/api/local-ai/policy`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ allowed: true })
+  });
+  assert.equal(allowResponse.status, 200);
+  const allowPayload = await allowResponse.json();
+  assert.equal(allowPayload.policy.allowed, true);
+});
+
+test("local AI restriction resets to allowed on startup", async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "hearthboard-"));
+  await writeFile(
+    path.join(dataDir, "store.json"),
+    JSON.stringify(
+      {
+        householdName: "Test House",
+        timezone: "America/Port-au-Prince",
+        members: [{ id: "seed-jody", name: "Jody", role: "", color: "#2473eb" }],
+        events: [],
+        bulletins: [],
+        mediaViews: {},
+        security: {
+          remoteAccess: {
+            passwordHash: null,
+            protectedPages: {
+              calendar: true,
+              assistant: true,
+              gallery: false
+            }
+          },
+          users: [],
+          sessions: [],
+          devices: [],
+          localAi: {
+            allowed: false,
+            updatedAt: "2026-04-18T00:00:00.000Z",
+            updatedBy: "local-tray"
+          },
+          pageVisibility: {
+            calendar: { lan: "family", remote: "family" },
+            gallery: { lan: "public", remote: "public" },
+            assistant: { lan: "trusted", remote: "trusted" }
+          },
+          libraryVisibility: {}
+        }
+      },
+      null,
+      2
+    )
+  );
+
+  const port = 42131;
+  const server = spawn(process.execPath, ["server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: "127.0.0.1",
+      DATA_DIR: dataDir
+    },
+    stdio: "inherit"
+  });
+
+  t.after(() => {
+    server.kill();
+  });
+
+  await waitForServer(port);
+
+  const response = await fetch(`http://127.0.0.1:${port}/api/local-ai/status`);
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.equal(payload.localAiAllowed, true);
+  assert.equal(payload.localAiPolicy.updatedBy, "startup");
 });
 
 test("assistant chat proxies to Ollama and requests immediate unload", async (t) => {

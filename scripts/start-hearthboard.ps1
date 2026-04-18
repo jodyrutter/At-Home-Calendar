@@ -19,6 +19,7 @@ try {
 
 Set-Location $projectRoot
 docker compose up --build -d
+& (Join-Path $PSScriptRoot "start-hearthboard-ai-tray.ps1")
 
 $localIp = $envInfo.lanIp
 
