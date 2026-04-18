@@ -19,32 +19,32 @@
 
       <section class="status-card">
         <div class="status-copy">
-          <span id="connection-pill" class="connection-pill waiting">Detecting</span>
-          <h2 id="connection-title">Looking for your board</h2>
-          <p id="connection-description">Checking local HTTPS first, then your DuckDNS address.</p>
+          <span id="connection-pill" class="connection-pill ready">Launch</span>
+          <h2 id="connection-title">Preparing Hearthboard</h2>
+          <p id="connection-description">Choosing the best route for this connection, then opening the board directly in the app.</p>
         </div>
         <dl class="status-grid">
           <div>
             <dt>Route</dt>
-            <dd id="connection-route">Scanning</dd>
+            <dd id="connection-route">Detecting</dd>
           </div>
           <div>
             <dt>Notifications</dt>
-            <dd id="notification-status">Waiting</dd>
+            <dd id="notification-status">After sign in</dd>
           </div>
         </dl>
       </section>
 
-      <section id="fallback-panel" class="fallback-panel" hidden>
-        <p>I could not reach Hearthboard yet. Make sure your server is up, then retry.</p>
+      <section id="fallback-panel" class="fallback-panel">
+        <p>The app will auto-open the preferred route in a moment. If Android guessed wrong, use one of the direct launch buttons instead.</p>
         <div class="fallback-actions">
-          <button id="retry-fallback" class="primary-button" type="button">Try again</button>
+          <button id="open-preferred" class="primary-button" type="button"><span id="open-preferred-label">Open preferred route</span></button>
+        </div>
+        <div class="fallback-actions route-actions">
+          <button id="open-local" class="ghost-button" type="button">Open home route</button>
+          <button id="open-remote" class="ghost-button" type="button">Open DuckDNS route</button>
         </div>
       </section>
-
-      <div class="frame-shell">
-        <iframe id="hearthboard-frame" title="Hearthboard mobile app" loading="eager" referrerpolicy="no-referrer"></iframe>
-      </div>
     </div>
 
     <script type="module" src="/src/main.js"></script>

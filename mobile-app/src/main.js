@@ -1,27 +1,23 @@
-import { Capacitor } from "@capacitor/core";
-import { App } from "@capacitor/app";
-import { LocalNotifications } from "@capacitor/local-notifications";
-import { Preferences } from "@capacitor/preferences";
-
-const BASE_URL_KEY = "hearthboard-mobile-base-url";
-const SCHEDULED_REMINDER_KEY = "hearthboard-mobile-reminders";
-const REMINDER_SYNC_INTERVAL_MS = 2 * 60 * 1000;
-const CANDIDATE_BASE_URLS = [
-  "https://192.168.1.118:42069",
-  "https://jodyrutter-sh.duckdns.org"
-];
-
-const state = {
-  baseUrl: "",
-  syncing: false,
-  lastReminderPayload: null
+const ROUTES = {
+  local: {
+    label: "Home network",
+    baseUrl: "https://192.168.1.118:42069"
+  },
+  remote: {
+    label: "DuckDNS",
+    baseUrl: "https://jodyrutter-sh.duckdns.org"
+  }
 };
 
+const searchParams = new URLSearchParams(window.location.search);
+const preferredRouteId = searchParams.get("preferredRoute") === "local" ? "local" : "remote";
+
 const elements = {
-  frame: document.querySelector("#hearthboard-frame"),
-  retryConnection: document.querySelector("#retry-connection"),
-  retryFallback: document.querySelector("#retry-fallback"),
-  fallbackPanel: document.querySelector("#fallback-panel"),
+  retry: document.querySelector("#retry-connection"),
+  openPreferred: document.querySelector("#open-preferred"),
+  openLocal: document.querySelector("#open-local"),
+  openRemote: document.querySelector("#open-remote"),
+  openPreferredLabel: document.querySelector("#open-preferred-label"),
   connectionPill: document.querySelector("#connection-pill"),
   connectionTitle: document.querySelector("#connection-title"),
   connectionDescription: document.querySelector("#connection-description"),
@@ -29,235 +25,184 @@ const elements = {
   notificationStatus: document.querySelector("#notification-status")
 };
 
-function setConnectionState(kind, title, description) {
-  elements.connectionPill.className = `connection-pill ${kind}`;
-  elements.connectionPill.textContent = kind === "local" ? "Local" : kind === "remote" ? "Remote" : kind === "ready" ? "Ready" : kind === "error" ? "Offline" : "Detecting";
-  elements.connectionTitle.textContent = title;
-  elements.connectionDescription.textContent = description;
-}
+const state = {
+  probeToken: 0,
+  opening: false
+};
 
-function baseUrlLabel(baseUrl) {
-  if (!baseUrl) {
-    return "Not set";
-  }
-
-  return baseUrl.includes("192.168.") ? "Local HTTPS" : "DuckDNS HTTPS";
-}
-
-async function canReach(baseUrl) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 2500);
-  try {
-    const response = await fetch(`${baseUrl}/api/health?ts=${Date.now()}`, {
-      method: "GET",
-      mode: "cors",
-      cache: "no-store",
-      signal: controller.signal
-    });
-    return response.ok;
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function detectBaseUrl() {
-  const saved = (await Preferences.get({ key: BASE_URL_KEY })).value;
-  const candidates = [...new Set([saved, ...CANDIDATE_BASE_URLS].filter(Boolean))];
-
-  for (const candidate of candidates) {
-    if (await canReach(candidate)) {
-      await Preferences.set({ key: BASE_URL_KEY, value: candidate });
-      return candidate;
-    }
-  }
-
-  return "";
-}
-
-function buildMobileUrl(baseUrl) {
+function mobileUrl(baseUrl) {
   const url = new URL("/", baseUrl);
   url.searchParams.set("mobileApp", "1");
   return url.toString();
 }
 
-function buildMobileEventUrl(baseUrl, eventUrl = "/") {
-  const url = new URL(eventUrl || "/", baseUrl);
-  url.searchParams.set("mobileApp", "1");
-  return url.toString();
-}
-
-function reminderNumericId(reminderId) {
-  let hash = 0;
-  for (const character of String(reminderId)) {
-    hash = ((hash << 5) - hash + character.charCodeAt(0)) | 0;
-  }
-
-  return Math.abs(hash) + 1;
-}
-
-async function syncNotifications(payload) {
-  state.lastReminderPayload = payload;
-  const reminders = Array.isArray(payload?.reminders) ? payload.reminders : [];
-
-  if (!Capacitor.isNativePlatform()) {
-    elements.notificationStatus.textContent = reminders.length ? `${reminders.length} queued for native build` : "Needs Android build";
+function openRoute(routeId) {
+  if (state.opening) {
     return;
   }
 
-  const permission = await LocalNotifications.requestPermissions();
-  if (permission.display !== "granted") {
-    elements.notificationStatus.textContent = "Permission blocked";
+  const route = ROUTES[routeId];
+  if (!route) {
     return;
   }
 
-  const now = Date.now();
-  const upcoming = reminders
-    .filter((reminder) => new Date(reminder.scheduleAt).getTime() > now)
-    .slice(0, 64);
-  const nextIds = upcoming.map((reminder) => reminderNumericId(reminder.reminderId));
-  const previousValue = (await Preferences.get({ key: SCHEDULED_REMINDER_KEY })).value;
-  const previousIds = previousValue ? JSON.parse(previousValue) : [];
-  const managedIds = [...new Set([...previousIds, ...nextIds])];
+  state.opening = true;
+  window.location.assign(mobileUrl(route.baseUrl));
+}
 
-  if (managedIds.length > 0) {
-    await LocalNotifications.cancel({
-      notifications: managedIds.map((id) => ({ id }))
-    });
+function describePreferredRoute(routeId) {
+  const route = ROUTES[routeId];
+  elements.connectionTitle.textContent = routeId === "local" ? "Ready to open your home route" : "Ready to open DuckDNS";
+  elements.connectionDescription.textContent = routeId === "local"
+    ? "Android detected a local-style connection. Tap the main button to open your LAN HTTPS board."
+    : "Android detected a non-local connection. Tap the main button to open your public DuckDNS board.";
+  elements.connectionRoute.textContent = route.label;
+  elements.notificationStatus.textContent = "Runs after sign in";
+  elements.openPreferredLabel.textContent = routeId === "local" ? "Open home route" : "Open DuckDNS route";
+}
+
+function setStatus({ pillClass, pillText, title, description, routeLabel, notificationLabel }) {
+  elements.connectionPill.className = `connection-pill ${pillClass}`;
+  elements.connectionPill.textContent = pillText;
+  elements.connectionTitle.textContent = title;
+  elements.connectionDescription.textContent = description;
+  elements.connectionRoute.textContent = routeLabel;
+  elements.notificationStatus.textContent = notificationLabel;
+}
+
+function describeProbeError(error) {
+  if (!error) {
+    return "The route did not answer.";
   }
 
-  if (upcoming.length > 0) {
-    await LocalNotifications.schedule({
-      notifications: upcoming.map((reminder) => ({
-        id: reminderNumericId(reminder.reminderId),
-        title: reminder.title,
-        body: reminder.body,
-        schedule: {
-          at: new Date(reminder.scheduleAt),
-          allowWhileIdle: true
-        },
-        extra: {
-          eventId: reminder.eventId,
-          eventUrl: reminder.eventUrl,
-          baseUrl: state.baseUrl
+  const message = String(error.message || error);
+  if (message.includes("ERR_CONNECTION_REFUSED")) {
+    return "The route refused the connection.";
+  }
+
+  if (message.includes("timed out")) {
+    return "The route timed out before responding.";
+  }
+
+  if (message.includes("Unable to resolve host")) {
+    return "Android could not resolve the route hostname.";
+  }
+
+  return message;
+}
+
+async function probeRoute(routeId) {
+  const route = ROUTES[routeId];
+  if (!route) {
+    return { ok: false, error: "Unknown route." };
+  }
+
+  const healthUrl = new URL("/api/health", route.baseUrl).toString();
+  const startedAt = performance.now();
+  const nativeHttp = window.Capacitor?.Plugins?.CapacitorHttp;
+
+  try {
+    if (nativeHttp?.request) {
+      const response = await nativeHttp.request({
+        url: healthUrl,
+        method: "GET",
+        connectTimeout: 5000,
+        readTimeout: 5000,
+        headers: {
+          "X-Hearthboard-Mobile-App": "1"
         }
-      }))
+      });
+
+      const status = Number(response?.status ?? 0);
+      if (status >= 200 && status < 300) {
+        return { ok: true, ms: Math.round(performance.now() - startedAt), status };
+      }
+
+      return { ok: false, error: `HTTP ${status || "unknown"}` };
+    }
+
+    const response = await fetch(healthUrl, {
+      method: "GET",
+      cache: "no-store",
+      headers: {
+        "X-Hearthboard-Mobile-App": "1"
+      }
     });
-  }
 
-  await Preferences.set({
-    key: SCHEDULED_REMINDER_KEY,
-    value: JSON.stringify(nextIds)
-  });
-
-  elements.notificationStatus.textContent = upcoming.length ? `${upcoming.length} scheduled` : "No upcoming reminders";
-}
-
-async function requestReminderSync() {
-  if (!elements.frame.contentWindow) {
-    return;
-  }
-
-  elements.frame.contentWindow.postMessage(
-    {
-      source: "hearthboard-mobile-app",
-      type: "hearthboard-mobile-sync"
-    },
-    "*"
-  );
-}
-
-async function connectFrame() {
-  if (state.syncing) {
-    return;
-  }
-
-  state.syncing = true;
-  setConnectionState("waiting", "Looking for your board", "Checking local HTTPS first, then your DuckDNS address.");
-  elements.connectionRoute.textContent = "Scanning";
-  elements.notificationStatus.textContent = "Waiting";
-  elements.fallbackPanel.hidden = true;
-
-  const baseUrl = await detectBaseUrl();
-  state.baseUrl = baseUrl;
-
-  if (!baseUrl) {
-    setConnectionState("error", "Hearthboard is not reachable", "I could not reach either your LAN HTTPS address or the DuckDNS address.");
-    elements.connectionRoute.textContent = "Unavailable";
-    elements.notificationStatus.textContent = "Offline";
-    elements.fallbackPanel.hidden = false;
-    state.syncing = false;
-    return;
-  }
-
-  const isLocal = baseUrl.includes("192.168.");
-  setConnectionState(isLocal ? "local" : "remote", isLocal ? "Connected on your home network" : "Connected through DuckDNS", `Using ${baseUrl} inside the app shell.`);
-  elements.connectionRoute.textContent = baseUrlLabel(baseUrl);
-  elements.notificationStatus.textContent = "Syncing";
-  elements.frame.src = buildMobileUrl(baseUrl);
-  state.syncing = false;
-}
-
-function openEventInFrame(eventUrl = "/") {
-  if (!state.baseUrl) {
-    return;
-  }
-
-  elements.frame.src = buildMobileEventUrl(state.baseUrl, eventUrl);
-}
-
-window.addEventListener("message", async (event) => {
-  if (event.source !== elements.frame.contentWindow) {
-    return;
-  }
-
-  if (event.data?.source !== "hearthboard-mobile") {
-    return;
-  }
-
-  if (event.data.type === "session") {
-    const session = event.data.payload || {};
-    elements.notificationStatus.textContent = session.authenticated ? "Waiting for reminder sync" : "Sign in to sync";
-    if (session.baseUrl) {
-      state.baseUrl = session.baseUrl;
-      setConnectionState(session.baseUrl.includes("192.168.") ? "local" : "remote", session.authenticated ? "Hearthboard is ready on mobile" : "Sign in to continue", session.authenticated ? "The app shell is connected and can mirror upcoming reminders." : "Once you sign in, this app will schedule your upcoming reminders.");
-      elements.connectionRoute.textContent = baseUrlLabel(session.baseUrl);
+    if (response.ok) {
+      return { ok: true, ms: Math.round(performance.now() - startedAt), status: response.status };
     }
+
+    return { ok: false, error: `HTTP ${response.status}` };
+  } catch (error) {
+    return { ok: false, error: describeProbeError(error) };
   }
+}
 
-  if (event.data.type === "reminders") {
-    await syncNotifications(event.data.payload || { reminders: [] });
-  }
+function preferredOrder() {
+  return preferredRouteId === "local"
+    ? ["local", "remote"]
+    : ["remote", "local"];
+}
 
-  if (event.data.type === "sync-error") {
-    elements.notificationStatus.textContent = "Sync problem";
-  }
-});
+async function runRouteSelection() {
+  const probeToken = state.probeToken + 1;
+  state.probeToken = probeToken;
+  state.opening = false;
 
-elements.retryConnection.addEventListener("click", connectFrame);
-elements.retryFallback.addEventListener("click", connectFrame);
-elements.frame.addEventListener("load", () => {
-  requestReminderSync();
-});
+  const failures = [];
+  for (const routeId of preferredOrder()) {
+    const route = ROUTES[routeId];
+    setStatus({
+      pillClass: "waiting",
+      pillText: "Checking",
+      title: `Checking ${route.label}`,
+      description: `Testing whether the ${route.label} route is reachable from this app before opening Hearthboard.`,
+      routeLabel: route.label,
+      notificationLabel: "Testing"
+    });
 
-setInterval(requestReminderSync, REMINDER_SYNC_INTERVAL_MS);
-
-App.addListener("appStateChange", ({ isActive }) => {
-  if (isActive) {
-    connectFrame();
-    requestReminderSync();
-  }
-});
-
-if (Capacitor.isNativePlatform()) {
-  LocalNotifications.addListener("localNotificationActionPerformed", async (event) => {
-    const eventUrl = String(event.notification?.extra?.eventUrl || "/");
-    if (!state.baseUrl) {
-      await connectFrame();
+    const result = await probeRoute(routeId);
+    if (state.probeToken !== probeToken) {
+      return;
     }
-    openEventInFrame(eventUrl);
+
+    if (result.ok) {
+      setStatus({
+        pillClass: routeId,
+        pillText: "Ready",
+        title: `Opening ${route.label}`,
+        description: `${route.label} responded in about ${result.ms} ms. Opening Hearthboard in the app now.`,
+        routeLabel: route.label,
+        notificationLabel: "Ready"
+      });
+      window.setTimeout(() => {
+        if (state.probeToken === probeToken) {
+          openRoute(routeId);
+        }
+      }, 250);
+      return;
+    }
+
+    failures.push(`${route.label}: ${result.error}`);
+  }
+
+  setStatus({
+    pillClass: "error",
+    pillText: "Offline",
+    title: "Hearthboard is not reachable",
+    description: `The app could not confirm either route. ${failures.join(" ")}`,
+    routeLabel: "Unavailable",
+    notificationLabel: "Offline"
   });
 }
 
-connectFrame();
+elements.retry.addEventListener("click", () => {
+  runRouteSelection();
+});
+elements.openPreferred.addEventListener("click", () => openRoute(preferredRouteId));
+elements.openLocal.addEventListener("click", () => openRoute("local"));
+elements.openRemote.addEventListener("click", () => openRoute("remote"));
+
+describePreferredRoute(preferredRouteId);
+runRouteSelection();
