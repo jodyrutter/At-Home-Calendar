@@ -1175,6 +1175,116 @@ test("new accounts stay out of the household roster until the admin approves hou
   assert.ok(payload.members.some((member) => member.username === "girlfriend"));
 });
 
+test("event reminder targets sync upcoming mobile reminders for the selected account", async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "hearthboard-"));
+  const port = 42132;
+  const server = spawn(process.execPath, ["server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: "127.0.0.1",
+      DATA_DIR: dataDir
+    },
+    stdio: "inherit"
+  });
+
+  t.after(() => {
+    server.kill();
+  });
+
+  await waitForServer(port);
+
+  const register = await fetch(`http://127.0.0.1:${port}/api/session/register`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      username: "jodygf",
+      password: "household123"
+    })
+  });
+  assert.equal(register.status, 201);
+
+  const adminCookie = await setAdminPasswordAndLogin(`http://127.0.0.1:${port}`);
+  const account = await fetch(`http://127.0.0.1:${port}/api/account`, {
+    headers: {
+      Cookie: adminCookie
+    }
+  });
+  const accountPayload = await account.json();
+  const targetUser = accountPayload.users.find((user) => user.username === "jodygf");
+  assert.ok(targetUser);
+
+  const approve = await fetch(`http://127.0.0.1:${port}/api/admin/users/${targetUser.id}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: adminCookie
+    },
+    body: JSON.stringify({
+      approved: true,
+      permissionLevel: "family",
+      householdMember: true
+    })
+  });
+  assert.equal(approve.status, 200);
+
+  const start = new Date(Date.now() + 2 * 60 * 60 * 1000);
+  const end = new Date(start.getTime() + 60 * 60 * 1000);
+  const createEvent = await fetch(`http://127.0.0.1:${port}/api/events`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: adminCookie
+    },
+    body: JSON.stringify({
+      title: "Dinner reminder",
+      category: "Meals",
+      location: "Kitchen",
+      description: "Do not forget pasta night.",
+      allDay: false,
+      memberIds: [],
+      notifications: {
+        enabled: true,
+        targetUserIds: [targetUser.id],
+        offsetsMinutes: [60, 10, 0]
+      },
+      start: start.toISOString(),
+      end: end.toISOString()
+    })
+  });
+  assert.equal(createEvent.status, 201);
+  const createdEvent = await createEvent.json();
+  assert.deepEqual(createdEvent.notifications.targetUserIds, [targetUser.id]);
+
+  const targetLogin = await fetch(`http://127.0.0.1:${port}/api/session/login`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      username: "jodygf",
+      password: "household123"
+    })
+  });
+  assert.equal(targetLogin.status, 200);
+  const targetCookie = cookieFromResponse(targetLogin, "hearthboard_session");
+
+  const reminderResponse = await fetch(`http://127.0.0.1:${port}/api/mobile/reminders`, {
+    headers: {
+      Cookie: targetCookie
+    }
+  });
+  assert.equal(reminderResponse.status, 200);
+  const reminderPayload = await reminderResponse.json();
+  assert.equal(reminderPayload.user.username, "jodygf");
+  assert.equal(reminderPayload.reminders.length, 3);
+  assert.ok(reminderPayload.reminders.every((reminder) => reminder.eventId === createdEvent.id));
+  assert.ok(reminderPayload.reminders.every((reminder) => typeof reminder.scheduleAt === "string"));
+});
+
 test("remote gallery hides authenticated libraries until a user signs in", async (t) => {
   const dataDir = await mkdtemp(path.join(tmpdir(), "hearthboard-"));
   const publicMediaDir = await mkdtemp(path.join(tmpdir(), "hearthboard-public-media-"));
@@ -1327,6 +1437,88 @@ test("admin account shows tracked devices in the account panel payload", async (
   const payload = await account.json();
   assert.ok(Array.isArray(payload.devices));
   assert.ok(payload.devices.some((device) => device.ip === "203.0.113.10"));
+});
+
+test("embedded mobile login sets a cross-site session cookie", async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "hearthboard-"));
+  const port = 42133;
+  const server = spawn(process.execPath, ["server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: "127.0.0.1",
+      DATA_DIR: dataDir,
+      TRUST_PROXY_HEADERS: "true"
+    },
+    stdio: "inherit"
+  });
+
+  t.after(() => {
+    server.kill();
+  });
+
+  await waitForServer(port);
+
+  await fetch(`http://127.0.0.1:${port}/api/auth/password`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      password: "supersecret123"
+    })
+  });
+
+  const login = await fetch(`http://127.0.0.1:${port}/api/session/login`, {
+    method: "POST",
+    headers: {
+      ...remoteHeaders(),
+      "Content-Type": "application/json",
+      "X-Hearthboard-Mobile-App": "1"
+    },
+    body: JSON.stringify({
+      username: "jodyrutter",
+      password: "supersecret123",
+      rememberMe: true
+    })
+  });
+  assert.equal(login.status, 200);
+  const setCookie = String(login.headers.get("set-cookie") || "");
+  assert.match(setCookie, /hearthboard_session=/);
+  assert.match(setCookie, /SameSite=None/);
+  assert.match(setCookie, /Secure/);
+});
+
+test("mobile app shell requests get a cross-site device cookie", async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "hearthboard-"));
+  const port = 42134;
+  const server = spawn(process.execPath, ["server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: "127.0.0.1",
+      DATA_DIR: dataDir,
+      TRUST_PROXY_HEADERS: "true"
+    },
+    stdio: "inherit"
+  });
+
+  t.after(() => {
+    server.kill();
+  });
+
+  await waitForServer(port);
+
+  const page = await fetch(`http://127.0.0.1:${port}/?mobileApp=1`, {
+    headers: remoteHeaders()
+  });
+  assert.equal(page.status, 200);
+  const setCookie = String(page.headers.get("set-cookie") || "");
+  assert.match(setCookie, /hearthboard_device=/);
+  assert.match(setCookie, /SameSite=None/);
+  assert.match(setCookie, /Secure/);
 });
 
 test("gallery view counts increase when media is opened", async (t) => {

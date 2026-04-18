@@ -62,6 +62,56 @@ npm run dev
 
 Then open `http://localhost:42069`.
 
+## Android app
+
+Hearthboard now includes a dedicated Android shell in [mobile-app](C:\Users\jody4\OneDrive\Documents\New project\mobile-app) that:
+
+- auto-detects your LAN board at `https://192.168.1.118:42069` first
+- falls back to `https://jodyrutter-sh.duckdns.org` when you are away from home
+- keeps the mobile session signed in with embedded-app cookies
+- schedules event reminders as on-device Android notifications after the app syncs them
+- reuses the same Hearthboard accounts and permissions as the website
+
+### Build the Android shell
+
+```powershell
+cd "C:\Users\jody4\OneDrive\Documents\New project\mobile-app"
+npm install
+npm run build
+npm run sync:android
+```
+
+To produce an APK, this PC also needs an Android SDK installed and reachable through `ANDROID_HOME`, `ANDROID_SDK_ROOT`, or `mobile-app\android\local.properties`.
+
+Once the SDK exists, build with:
+
+```powershell
+cd "C:\Users\jody4\OneDrive\Documents\New project\mobile-app\android"
+.\gradlew.bat assembleDebug
+```
+
+The debug APK will land at:
+
+`mobile-app\android\app\build\outputs\apk\debug\app-debug.apk`
+
+### First phone setup
+
+- Install the APK on your Android phone.
+- If you want LAN access through `https://192.168.1.118:42069`, import [hearthboard-local-root.crt](C:\Users\jody4\OneDrive\Documents\New project\local-certs\hearthboard-local-root.crt) on that phone so Android trusts the local certificate.
+- Open the app and sign in with your Hearthboard account.
+- Allow notification permission when Android prompts for it.
+- From then on, the app will sync upcoming event reminders and schedule them locally on the device.
+
+### Event reminders
+
+When creating or editing an event on the calendar, you can now:
+
+- enable reminders for that event
+- choose which approved accounts should receive them
+- choose reminder offsets such as `1 day`, `3 hours`, `1 hour`, `10 minutes`, or `At time`
+
+Those reminders are exposed through `GET /api/mobile/reminders` for the signed-in account and consumed by the Android app.
+
 ## Data persistence
 
 Calendar data is stored in the named Docker volume `hearthboard-data`. If you want a bind-mounted folder instead, replace the volume section in [docker-compose.yml](C:\Users\jody4\OneDrive\Documents\New project\docker-compose.yml) with a host path mapping.

@@ -49,6 +49,8 @@ const ADMIN_USERNAME = "jodyrutter";
 const VISIBILITY_OPTIONS = new Set(["public", "trusted", "family", "admin"]);
 const PERMISSION_LEVELS = ["default", "trusted", "family", "admin"];
 const PAGE_KEYS = ["calendar", "gallery", "assistant"];
+const EVENT_NOTIFICATION_OFFSET_OPTIONS = [1440, 180, 60, 10, 0];
+const MOBILE_REMINDER_LOOKAHEAD_DAYS = 45;
 const VISIBILITY_RANKS = new Map([
   ["public", 0],
   ["trusted", 1],
@@ -232,6 +234,10 @@ const pendingMediaIndexJobs = new Map();
 const authSessions = new Map();
 const authRateLimitBuckets = new Map();
 
+if (!Array.isArray(db.data.events)) {
+  db.data.events = [];
+}
+
 if (!Array.isArray(db.data.bulletins)) {
   db.data.bulletins = [];
 }
@@ -301,6 +307,11 @@ for (const library of mediaLibraries) {
     db.data.security.libraryVisibility[library.id],
     defaultLibraryVisibilityEntry(library)
   );
+}
+
+for (const event of db.data.events) {
+  event.memberIds = Array.isArray(event.memberIds) ? [...new Set(event.memberIds.map((memberId) => String(memberId || "").trim()).filter(Boolean))] : [];
+  event.notifications = sanitizeStoredEventNotifications(event.notifications);
 }
 
 for (const user of db.data.security.users) {
@@ -446,6 +457,24 @@ function prettifyUsername(username) {
     .join(" ");
 }
 
+function notificationOffsetLabel(offsetMinutes) {
+  if (offsetMinutes === 0) {
+    return "At start";
+  }
+
+  if (offsetMinutes % 1440 === 0) {
+    const days = offsetMinutes / 1440;
+    return `${days} day${days === 1 ? "" : "s"} before`;
+  }
+
+  if (offsetMinutes % 60 === 0) {
+    const hours = offsetMinutes / 60;
+    return `${hours} hour${hours === 1 ? "" : "s"} before`;
+  }
+
+  return `${offsetMinutes} min before`;
+}
+
 function memberColorForUser(user, existingMember = null) {
   const current = String(existingMember?.color || "").trim();
   if (/^#[0-9a-f]{6}$/i.test(current)) {
@@ -496,8 +525,18 @@ function synchronizeMembersWithUsers() {
   }
 
   const validMemberIds = new Set(nextMembers.map((member) => member.id));
+  const validNotificationUserIds = new Set(notificationTargetUsers().map((user) => user.id));
   for (const event of db.data.events) {
     event.memberIds = Array.isArray(event.memberIds) ? event.memberIds.filter((memberId) => validMemberIds.has(memberId)) : [];
+    event.notifications = sanitizeStoredEventNotifications(event.notifications);
+    event.notifications.targetUserIds = event.notifications.targetUserIds.filter((userId) => validNotificationUserIds.has(userId));
+    if (event.notifications.targetUserIds.length === 0) {
+      event.notifications = {
+        enabled: false,
+        targetUserIds: [],
+        offsetsMinutes: []
+      };
+    }
   }
 
   db.data.members = sortMembers(nextMembers);
@@ -515,6 +554,7 @@ function normalizeEventPayload(payload, existingEvent = null) {
   const memberIds = Array.isArray(payload.memberIds)
     ? payload.memberIds.filter((memberId) => db.data.members.some((member) => member.id === memberId))
     : [];
+  const notifications = normalizeEventNotifications(payload.notifications, existingEvent?.notifications);
 
   if (!title) {
     return { error: "Event title is required." };
@@ -528,6 +568,14 @@ function normalizeEventPayload(payload, existingEvent = null) {
     return { error: "Event end time must be after the start time." };
   }
 
+  if (notifications.enabled && notifications.targetUserIds.length === 0) {
+    return { error: "Choose at least one account to notify." };
+  }
+
+  if (notifications.enabled && notifications.offsetsMinutes.length === 0) {
+    return { error: "Choose at least one reminder time." };
+  }
+
   return {
     data: {
       id: existingEvent?.id || nanoid(),
@@ -537,6 +585,7 @@ function normalizeEventPayload(payload, existingEvent = null) {
       location,
       allDay,
       memberIds,
+      notifications,
       start: start.toISOString(),
       end: end.toISOString(),
       createdAt: existingEvent?.createdAt || new Date().toISOString(),
@@ -574,14 +623,20 @@ function normalizeBulletinPayload(payload, existingBulletin = null) {
   };
 }
 
-function snapshot() {
+function snapshot(request = null) {
   return {
     householdName: db.data.householdName,
     timezone: db.data.timezone,
     members: sortMembers(db.data.members),
     events: sortEvents(db.data.events),
     bulletins: sortBulletins(db.data.bulletins),
-    mediaLibraries: mediaLibraries.map((library) => ({ id: library.id, label: library.label }))
+    mediaLibraries: mediaLibraries.map((library) => ({ id: library.id, label: library.label })),
+    notificationTargets: notificationTargetUsers().map((user) => notificationTargetSummary(user)),
+    reminderOptions: EVENT_NOTIFICATION_OFFSET_OPTIONS.map((offsetMinutes) => ({
+      offsetMinutes,
+      label: notificationOffsetLabel(offsetMinutes)
+    })),
+    currentUser: request ? userSummary(authenticatedUser(request)) : null
   };
 }
 
@@ -634,6 +689,134 @@ function userSummary(user) {
     createdAt: user.createdAt || null,
     updatedAt: user.updatedAt || null
   };
+}
+
+function notificationTargetUsers() {
+  return users()
+    .filter((user) => user.role === "admin" || userIsApproved(user))
+    .sort((left, right) => {
+      const leftLabel = notificationTargetSummary(left).label.toLowerCase();
+      const rightLabel = notificationTargetSummary(right).label.toLowerCase();
+      return leftLabel.localeCompare(rightLabel);
+    });
+}
+
+function notificationTargetSummary(user) {
+  const member = memberByUserId(user.id);
+  return {
+    id: user.id,
+    username: user.username,
+    label: member?.name || prettifyUsername(user.username),
+    role: user.role === "admin" ? "Admin" : normalizedPermissionLevel(user)
+  };
+}
+
+function normalizeNotificationOffsets(offsets) {
+  if (!Array.isArray(offsets)) {
+    return [];
+  }
+
+  return [...new Set(offsets
+    .map((offset) => Number.parseInt(String(offset), 10))
+    .filter((offset) => Number.isFinite(offset) && offset >= 0 && offset <= 14 * 24 * 60))]
+    .sort((left, right) => right - left);
+}
+
+function normalizeEventNotifications(payload, existingNotifications = null) {
+  const source = payload && typeof payload === "object" ? payload : {};
+  const enabled = normalizeBoolean(source.enabled);
+  const approvedUserIds = new Set(notificationTargetUsers().map((user) => user.id));
+  const targetUserIds = Array.isArray(source.targetUserIds)
+    ? [...new Set(source.targetUserIds.map((userId) => String(userId || "").trim()).filter((userId) => approvedUserIds.has(userId)))]
+    : [];
+  const fallbackOffsets = enabled
+    ? existingNotifications?.offsetsMinutes || EVENT_NOTIFICATION_OFFSET_OPTIONS
+    : [];
+  const offsetsMinutes = normalizeNotificationOffsets(source.offsetsMinutes ?? fallbackOffsets);
+
+  return {
+    enabled,
+    targetUserIds: enabled ? targetUserIds : [],
+    offsetsMinutes: enabled ? offsetsMinutes : []
+  };
+}
+
+function sanitizeStoredEventNotifications(notifications) {
+  return normalizeEventNotifications(notifications, notifications);
+}
+
+function upcomingReminderEntriesForUser(user, now = new Date()) {
+  if (!user) {
+    return [];
+  }
+
+  const lookaheadLimit = new Date(now.getTime() + MOBILE_REMINDER_LOOKAHEAD_DAYS * 24 * 60 * 60 * 1000);
+
+  return sortEvents(db.data.events)
+    .flatMap((event) => {
+      const notifications = sanitizeStoredEventNotifications(event.notifications);
+      if (!notifications.enabled || !notifications.targetUserIds.includes(user.id)) {
+        return [];
+      }
+
+      const eventStart = new Date(event.start);
+      if (Number.isNaN(eventStart.getTime())) {
+        return [];
+      }
+
+      return notifications.offsetsMinutes.flatMap((offsetMinutes) => {
+        const triggerAt = new Date(eventStart.getTime() - offsetMinutes * 60 * 1000);
+        if (triggerAt < now || triggerAt > lookaheadLimit) {
+          return [];
+        }
+
+        const title = offsetMinutes === 0 ? `${event.title} starts now` : `${event.title} is coming up`;
+        const bodyParts = [formatReminderEventTime(event)];
+        if (event.location) {
+          bodyParts.push(event.location);
+        }
+        if (offsetMinutes > 0) {
+          bodyParts.unshift(notificationOffsetLabel(offsetMinutes));
+        }
+
+        return {
+          reminderId: `${event.id}:${user.id}:${offsetMinutes}`,
+          eventId: event.id,
+          eventTitle: event.title,
+          title,
+          body: bodyParts.filter(Boolean).join(" | "),
+          scheduleAt: triggerAt.toISOString(),
+          eventStart: event.start,
+          eventEnd: event.end,
+          offsetMinutes,
+          offsetLabel: notificationOffsetLabel(offsetMinutes),
+          location: event.location || "",
+          category: event.category || "General",
+          allDay: Boolean(event.allDay),
+          eventUrl: "/",
+          updatedAt: event.updatedAt || event.createdAt || event.start
+        };
+      });
+    })
+    .sort((left, right) => new Date(left.scheduleAt).getTime() - new Date(right.scheduleAt).getTime());
+}
+
+function formatReminderEventTime(event) {
+  const start = new Date(event.start);
+  if (Number.isNaN(start.getTime())) {
+    return "Upcoming event";
+  }
+
+  if (event.allDay) {
+    return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(start) + " all day";
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(start);
 }
 
 function adminManagedUserSummary(user) {
@@ -945,12 +1128,54 @@ function requestIsSecure(request) {
   return Boolean(request.socket?.encrypted);
 }
 
+function requestWantsMobileCookies(request) {
+  if (String(request.headers["x-hearthboard-mobile-app"] || "").trim() === "1") {
+    return true;
+  }
+
+  const queryFlag = String(request.query?.mobileApp || request.query?.mobileapp || "").trim().toLowerCase();
+  if (queryFlag === "1" || queryFlag === "true") {
+    return true;
+  }
+
+  const referer = String(request.headers.referer || "").trim();
+  if (!referer) {
+    return false;
+  }
+
+  try {
+    const refererUrl = new URL(referer);
+    const mobileFlag = String(refererUrl.searchParams.get("mobileApp") || "").trim().toLowerCase();
+    return mobileFlag === "1" || mobileFlag === "true";
+  } catch {
+    return false;
+  }
+}
+
+function authCookieSameSite(request) {
+  if (requestIsSecure(request) && requestWantsMobileCookies(request)) {
+    return "None";
+  }
+
+  return "Lax";
+}
+
+function loginRedirectUrl(request, nextPath) {
+  const params = new URLSearchParams();
+  params.set("next", nextPath);
+  if (requestWantsMobileCookies(request)) {
+    params.set("mobileApp", "1");
+  }
+
+  return `/login?${params.toString()}`;
+}
+
 function setAuthCookie(request, response, token, remembered = false) {
   const parts = [
     `${AUTH_COOKIE}=${encodeURIComponent(token)}`,
     "Path=/",
     "HttpOnly",
-    "SameSite=Lax"
+    `SameSite=${authCookieSameSite(request)}`
   ];
 
   if (remembered) {
@@ -965,7 +1190,7 @@ function setAuthCookie(request, response, token, remembered = false) {
 }
 
 function clearAuthCookie(request, response) {
-  const parts = [`${AUTH_COOKIE}=`, "Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=0"];
+  const parts = [`${AUTH_COOKIE}=`, "Path=/", "HttpOnly", `SameSite=${authCookieSameSite(request)}`, "Max-Age=0"];
   if (requestIsSecure(request)) {
     parts.push("Secure");
   }
@@ -978,7 +1203,7 @@ function setDeviceCookie(request, response, deviceId) {
     `${DEVICE_COOKIE}=${encodeURIComponent(deviceId)}`,
     "Path=/",
     "HttpOnly",
-    "SameSite=Lax",
+    `SameSite=${authCookieSameSite(request)}`,
     `Max-Age=${Math.floor(DEVICE_COOKIE_TTL_MS / 1000)}`
   ];
   if (requestIsSecure(request)) {
@@ -2518,6 +2743,13 @@ function requestGuardForPath(request) {
     };
   }
 
+  if (requestPath.startsWith("/api/mobile/")) {
+    return {
+      kind: "authenticated",
+      message: "Sign in to sync mobile reminders."
+    };
+  }
+
   if (requestPath.startsWith("/api/admin/")) {
     return {
       kind: "admin",
@@ -2607,12 +2839,14 @@ app.use(async (request, response, next) => {
   }
 
   const nextPath = `${request.path}${request.url.includes("?") ? request.url.slice(request.url.indexOf("?")) : ""}`;
-  return response.redirect(`/login?next=${encodeURIComponent(nextPath)}`);
+  return response.redirect(loginRedirectUrl(request, nextPath));
 });
 
 app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/api/health", (_request, response) => {
+  response.setHeader("Access-Control-Allow-Origin", "*");
+  response.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   response.json({ ok: true, service: "hearthboard" });
 });
 
@@ -2930,8 +3164,21 @@ app.post("/api/auth/password", async (request, response) => {
   return response.json({ ok: true });
 });
 
-app.get("/api/bootstrap", (_request, response) => {
-  response.json(snapshot());
+app.get("/api/bootstrap", (request, response) => {
+  response.json(snapshot(request));
+});
+
+app.get("/api/mobile/reminders", (request, response) => {
+  const user = authenticatedUser(request);
+  if (!user) {
+    return response.status(401).json({ error: "Sign in to sync mobile reminders." });
+  }
+
+  response.json({
+    generatedAt: new Date().toISOString(),
+    user: notificationTargetSummary(user),
+    reminders: upcomingReminderEntriesForUser(user)
+  });
 });
 
 app.get("/api/media/libraries", (request, response) => {
@@ -3619,8 +3866,8 @@ app.get("/login", (_request, response) => {
 });
 
 app.get("/access", (request, response) => {
-  const nextPath = request.query?.next ? `?next=${encodeURIComponent(String(request.query.next))}` : "";
-  response.redirect(`/login${nextPath}`);
+  const nextPath = String(request.query?.next || "/");
+  response.redirect(loginRedirectUrl(request, nextPath));
 });
 
 app.get("/assistant", (_request, response) => {

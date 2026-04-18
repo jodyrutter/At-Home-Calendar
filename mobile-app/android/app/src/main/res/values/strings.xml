@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Hearthboard</string>
+    <string name="title_activity_main">Hearthboard</string>
+    <string name="package_name">org.jodyrutter.hearthboard</string>
+    <string name="custom_url_scheme">org.jodyrutter.hearthboard</string>
+</resources>

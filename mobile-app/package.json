@@ -1,0 +1,23 @@
+{
+  "name": "hearthboard-mobile",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npx vite",
+    "build": "npx vite build",
+    "sync:android": "npx cap sync android",
+    "open:android": "npx cap open android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.1.1",
+    "@capacitor/app": "^7.0.2",
+    "@capacitor/core": "^7.1.1",
+    "@capacitor/local-notifications": "^7.0.3",
+    "@capacitor/preferences": "^7.0.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.1.1",
+    "vite": "^7.1.12"
+  }
+}

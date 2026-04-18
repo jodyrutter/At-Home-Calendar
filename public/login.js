@@ -1,4 +1,16 @@
-const nextUrl = new URLSearchParams(window.location.search).get("next") || "/account";
+const searchParams = new URLSearchParams(window.location.search);
+const isEmbeddedMobileApp = window.self !== window.top || searchParams.get("mobileApp") === "1";
+
+function pathWithMobileApp(pathname) {
+  const url = new URL(pathname || "/account", window.location.origin);
+  if (isEmbeddedMobileApp) {
+    url.searchParams.set("mobileApp", "1");
+  }
+
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
+const nextUrl = pathWithMobileApp(searchParams.get("next") || "/account");
 
 const elements = {
   copy: document.querySelector("#login-copy"),
@@ -93,7 +105,7 @@ elements.registerForm?.addEventListener("submit", async (event) => {
       })
     });
 
-    window.location.replace("/account");
+    window.location.replace(pathWithMobileApp("/account"));
   } catch (error) {
     showError(elements.registerError, error.message);
   }

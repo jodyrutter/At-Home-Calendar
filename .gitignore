@@ -1,7 +1,11 @@
 node_modules/
+mobile-app/node_modules/
+mobile-app/dist/
+mobile-app/android/.gradle/
 data/store.json
 *.log
 .env
 .venv-phone-clean/
 local-certs/
 logs/
+Freedom-Flight/

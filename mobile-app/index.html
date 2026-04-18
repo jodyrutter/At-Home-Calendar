@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Hearthboard Mobile</title>
+    <meta name="theme-color" content="#dd6b20" />
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div class="mobile-shell">
+      <header class="mobile-header">
+        <div>
+          <p class="eyebrow">Pocket command center</p>
+          <h1>Hearthboard</h1>
+        </div>
+        <button id="retry-connection" class="ghost-button" type="button">Retry</button>
+      </header>
+
+      <section class="status-card">
+        <div class="status-copy">
+          <span id="connection-pill" class="connection-pill waiting">Detecting</span>
+          <h2 id="connection-title">Looking for your board</h2>
+          <p id="connection-description">Checking local HTTPS first, then your DuckDNS address.</p>
+        </div>
+        <dl class="status-grid">
+          <div>
+            <dt>Route</dt>
+            <dd id="connection-route">Scanning</dd>
+          </div>
+          <div>
+            <dt>Notifications</dt>
+            <dd id="notification-status">Waiting</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section id="fallback-panel" class="fallback-panel" hidden>
+        <p>I could not reach Hearthboard yet. Make sure your server is up, then retry.</p>
+        <div class="fallback-actions">
+          <button id="retry-fallback" class="primary-button" type="button">Try again</button>
+        </div>
+      </section>
+
+      <div class="frame-shell">
+        <iframe id="hearthboard-frame" title="Hearthboard mobile app" loading="eager" referrerpolicy="no-referrer"></iframe>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

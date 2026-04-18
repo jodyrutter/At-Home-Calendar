@@ -1,0 +1,6 @@
+{
+  "appId": "org.jodyrutter.hearthboard",
+  "appName": "Hearthboard",
+  "webDir": "dist",
+  "bundledWebRuntime": false
+}

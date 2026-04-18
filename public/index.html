@@ -203,6 +203,25 @@
           <div id="member-checkboxes" class="checkbox-grid"></div>
         </fieldset>
 
+        <fieldset class="notification-fieldset">
+          <legend>Phone reminders</legend>
+          <label class="checkbox-field">
+            <input id="event-notifications-enabled" name="notificationsEnabled" type="checkbox" />
+            Send push-style phone reminders for this event
+          </label>
+          <div id="event-notification-config" class="stack" hidden>
+            <div>
+              <p class="meta-label">Who gets bugged</p>
+              <div id="notification-target-checkboxes" class="checkbox-grid"></div>
+            </div>
+            <div>
+              <p class="meta-label">When to remind them</p>
+              <div id="notification-offset-checkboxes" class="checkbox-grid"></div>
+            </div>
+            <p class="muted">These reminders sync to the Android app and get scheduled on the phone for the selected accounts.</p>
+          </div>
+        </fieldset>
+
         <p id="event-form-error" class="form-error" hidden></p>
 
         <div class="modal-actions">
@@ -271,6 +290,7 @@
     </template>
 
     <script type="module" src="/theme.js"></script>
+    <script type="module" src="/mobile-bridge.js"></script>
     <script type="module" src="/app.js"></script>
   </body>
 </html>

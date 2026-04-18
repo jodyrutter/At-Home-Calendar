@@ -4,6 +4,9 @@ const state = {
   members: [],
   events: [],
   bulletins: [],
+  notificationTargets: [],
+  reminderOptions: [],
+  currentUser: null,
   selectedDate: toDateKey(new Date()),
   visibleMonth: startOfMonth(new Date()),
   activeFilters: new Set(),
@@ -36,6 +39,10 @@ const elements = {
   deleteEvent: document.querySelector("#delete-event"),
   deleteBulletin: document.querySelector("#delete-bulletin"),
   memberCheckboxes: document.querySelector("#member-checkboxes"),
+  notificationsEnabled: document.querySelector("#event-notifications-enabled"),
+  notificationConfig: document.querySelector("#event-notification-config"),
+  notificationTargetCheckboxes: document.querySelector("#notification-target-checkboxes"),
+  notificationOffsetCheckboxes: document.querySelector("#notification-offset-checkboxes"),
   eventFormError: document.querySelector("#event-form-error"),
   bulletinFormError: document.querySelector("#bulletin-form-error"),
   emptyStateTemplate: document.querySelector("#empty-state-template")
@@ -112,6 +119,33 @@ function formatTimestamp(value) {
   }).format(new Date(value));
 }
 
+function notificationTarget(targetUserId) {
+  return state.notificationTargets.find((target) => target.id === targetUserId) || null;
+}
+
+function reminderOption(offsetMinutes) {
+  return state.reminderOptions.find((option) => option.offsetMinutes === offsetMinutes) || null;
+}
+
+function eventNotificationSummary(event) {
+  const notifications = event.notifications || {};
+  if (!notifications.enabled) {
+    return "";
+  }
+
+  const targetLabels = (notifications.targetUserIds || [])
+    .map((userId) => notificationTarget(userId)?.label)
+    .filter(Boolean)
+    .join(", ");
+  const offsetLabels = (notifications.offsetsMinutes || [])
+    .map((offsetMinutes) => reminderOption(offsetMinutes)?.label || `${offsetMinutes} min before`)
+    .join(", ");
+
+  return [targetLabels ? `Notify: ${targetLabels}` : "", offsetLabels ? `When: ${offsetLabels}` : ""]
+    .filter(Boolean)
+    .join(" | ");
+}
+
 function eventOverlapsDay(event, dateKey) {
   const target = parseDateKey(dateKey);
   const dayStart = new Date(target.getFullYear(), target.getMonth(), target.getDate(), 0, 0, 0, 0);
@@ -182,6 +216,9 @@ async function loadBoard() {
   state.members = payload.members;
   state.events = payload.events;
   state.bulletins = payload.bulletins || [];
+  state.notificationTargets = payload.notificationTargets || [];
+  state.reminderOptions = payload.reminderOptions || [];
+  state.currentUser = payload.currentUser || null;
 
   const validMemberIds = new Set(payload.members.map((member) => member.id));
   state.activeFilters = new Set([...state.activeFilters].filter((memberId) => validMemberIds.has(memberId)));
@@ -192,6 +229,7 @@ async function loadBoard() {
   }
 
   render();
+  window.dispatchEvent(new Event("hearthboard:mobile-sync"));
 }
 
 function render() {
@@ -203,6 +241,7 @@ function render() {
   renderBulletins();
   renderMembers();
   renderMemberCheckboxes();
+  renderNotificationCheckboxes();
 }
 
 function renderHeader() {
@@ -392,6 +431,29 @@ function renderMemberCheckboxes() {
   });
 }
 
+function renderNotificationCheckboxes() {
+  elements.notificationTargetCheckboxes.innerHTML = "";
+  elements.notificationOffsetCheckboxes.innerHTML = "";
+
+  state.notificationTargets.forEach((target) => {
+    const label = document.createElement("label");
+    label.innerHTML = `
+      <input type="checkbox" name="notificationTargetUserIds" value="${target.id}" />
+      <span>${target.label}</span>
+    `;
+    elements.notificationTargetCheckboxes.append(label);
+  });
+
+  state.reminderOptions.forEach((option) => {
+    const label = document.createElement("label");
+    label.innerHTML = `
+      <input type="checkbox" name="notificationOffsetsMinutes" value="${option.offsetMinutes}" />
+      <span>${option.label}</span>
+    `;
+    elements.notificationOffsetCheckboxes.append(label);
+  });
+}
+
 function eventCard(event, includeEdit = true) {
   const article = document.createElement("article");
   article.className = "event-card";
@@ -406,6 +468,7 @@ function eventCard(event, includeEdit = true) {
     <p class="event-card-meta">${formatEventRange(event)}</p>
     <p class="event-card-meta">${event.category}${event.location ? ` | ${event.location}` : ""}</p>
     <p class="event-card-meta">${assignedNames || "Unassigned"}</p>
+    ${eventNotificationSummary(event) ? `<p class="event-card-meta">${eventNotificationSummary(event)}</p>` : ""}
     ${event.description ? `<p class="event-card-meta">${event.description}</p>` : ""}
   `;
 
@@ -472,7 +535,15 @@ function resetEventForm(dateValue = state.selectedDate) {
   Array.from(elements.eventForm.querySelectorAll('input[name="memberIds"]')).forEach((input) => {
     input.checked = false;
   });
+  elements.notificationsEnabled.checked = false;
+  Array.from(elements.eventForm.querySelectorAll('input[name="notificationTargetUserIds"]')).forEach((input) => {
+    input.checked = state.currentUser ? input.value === state.currentUser.id : false;
+  });
+  Array.from(elements.eventForm.querySelectorAll('input[name="notificationOffsetsMinutes"]')).forEach((input) => {
+    input.checked = ["60", "10", "0"].includes(input.value);
+  });
   toggleTimeFields();
+  toggleNotificationFields();
 }
 
 function resetBulletinForm() {
@@ -508,12 +579,20 @@ function openEventModal(event = null) {
   elements.eventForm.elements.location.value = event.location || "";
   elements.eventForm.elements.description.value = event.description || "";
   elements.eventForm.elements.allDay.checked = Boolean(event.allDay);
+  elements.notificationsEnabled.checked = Boolean(event.notifications?.enabled);
 
   Array.from(elements.eventForm.querySelectorAll('input[name="memberIds"]')).forEach((input) => {
     input.checked = event.memberIds.includes(input.value);
   });
+  Array.from(elements.eventForm.querySelectorAll('input[name="notificationTargetUserIds"]')).forEach((input) => {
+    input.checked = Boolean(event.notifications?.targetUserIds?.includes(input.value));
+  });
+  Array.from(elements.eventForm.querySelectorAll('input[name="notificationOffsetsMinutes"]')).forEach((input) => {
+    input.checked = Boolean(event.notifications?.offsetsMinutes?.includes(Number(input.value)));
+  });
 
   toggleTimeFields();
+  toggleNotificationFields();
   elements.eventModal.showModal();
 }
 
@@ -546,6 +625,14 @@ function toggleTimeFields() {
   elements.eventForm.elements.endTime.disabled = allDay;
 }
 
+function toggleNotificationFields() {
+  const enabled = elements.notificationsEnabled.checked;
+  elements.notificationConfig.hidden = !enabled;
+  Array.from(elements.eventForm.querySelectorAll('input[name="notificationTargetUserIds"], input[name="notificationOffsetsMinutes"]')).forEach((input) => {
+    input.disabled = !enabled;
+  });
+}
+
 async function handleEventSubmit(event) {
   event.preventDefault();
   elements.eventFormError.hidden = true;
@@ -562,7 +649,10 @@ async function handleEventSubmit(event) {
     location: formData.get("location"),
     description: formData.get("description"),
     allDay,
-    memberIds: formData.getAll("memberIds")
+    memberIds: formData.getAll("memberIds"),
+    notificationsEnabled: formData.get("notificationsEnabled") === "on",
+    notificationTargetUserIds: formData.getAll("notificationTargetUserIds"),
+    notificationOffsetsMinutes: formData.getAll("notificationOffsetsMinutes")
   };
 
   const body = {
@@ -572,6 +662,11 @@ async function handleEventSubmit(event) {
     description: payload.description,
     allDay,
     memberIds: payload.memberIds,
+    notifications: {
+      enabled: payload.notificationsEnabled,
+      targetUserIds: payload.notificationTargetUserIds,
+      offsetsMinutes: payload.notificationOffsetsMinutes.map((value) => Number(value))
+    },
     start: combineDateAndTime(payload.date, payload.startTime || "00:00", allDay).toISOString(),
     end: combineDateAndTime(payload.endDate, payload.endTime || "23:59", allDay, true).toISOString()
   };
@@ -664,6 +759,7 @@ function bindEvents() {
   elements.eventForm.addEventListener("submit", handleEventSubmit);
   elements.bulletinForm.addEventListener("submit", handleBulletinSubmit);
   elements.eventForm.elements.allDay.addEventListener("change", toggleTimeFields);
+  elements.notificationsEnabled.addEventListener("change", toggleNotificationFields);
   elements.deleteEvent.addEventListener("click", async () => {
     try {
       await deleteCurrentEvent();
