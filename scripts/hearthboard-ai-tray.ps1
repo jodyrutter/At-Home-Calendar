@@ -21,16 +21,15 @@ if (-not $createdNew) {
 }
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$baseUrl = "https://127.0.0.1:42069"
+$baseUrl = "http://127.0.0.1:42070"
 $statusEndpoint = "$baseUrl/api/local-ai/status"
 $policyEndpoint = "$baseUrl/api/local-ai/policy"
 $assistantUrl = "https://127.0.0.1:42069/assistant"
-[System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
 
 function ConvertTo-Icon {
   param(
     [System.Drawing.Color]$Color,
-    [string]$Glyph
+    [string]$Symbol
   )
 
   $bitmap = [System.Drawing.Bitmap]::new(16, 16)
@@ -50,13 +49,30 @@ function ConvertTo-Icon {
   $graphics.DrawEllipse($pen, 1.4, 1.4, 12, 12)
   $pen.Dispose()
 
-  if ($Glyph) {
+  if ($Symbol -eq "check") {
+    $symbolPen = [System.Drawing.Pen]::new([System.Drawing.Color]::White, 2.2)
+    $symbolPen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+    $symbolPen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+    $graphics.DrawLines($symbolPen, [System.Drawing.Point[]]@(
+      [System.Drawing.Point]::new(4, 8),
+      [System.Drawing.Point]::new(7, 11),
+      [System.Drawing.Point]::new(12, 5)
+    ))
+    $symbolPen.Dispose()
+  } elseif ($Symbol -eq "x") {
+    $symbolPen = [System.Drawing.Pen]::new([System.Drawing.Color]::White, 2.1)
+    $symbolPen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+    $symbolPen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+    $graphics.DrawLine($symbolPen, 4, 4, 11, 11)
+    $graphics.DrawLine($symbolPen, 11, 4, 4, 11)
+    $symbolPen.Dispose()
+  } elseif ($Symbol) {
     $font = [System.Drawing.Font]::new("Segoe UI", 7.5, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
     $textBrush = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::White)
     $format = [System.Drawing.StringFormat]::new()
     $format.Alignment = [System.Drawing.StringAlignment]::Center
     $format.LineAlignment = [System.Drawing.StringAlignment]::Center
-    $graphics.DrawString($Glyph, $font, $textBrush, [System.Drawing.RectangleF]::new(0, 0, 16, 16), $format)
+    $graphics.DrawString($Symbol, $font, $textBrush, [System.Drawing.RectangleF]::new(0, 0, 16, 16), $format)
     $format.Dispose()
     $textBrush.Dispose()
     $font.Dispose()
@@ -114,11 +130,10 @@ function Get-StatusSnapshot {
 }
 
 $icons = @{
-  sleeping = ConvertTo-Icon -Color ([System.Drawing.Color]::FromArgb(64, 116, 184)) -Glyph ""
-  awake = ConvertTo-Icon -Color ([System.Drawing.Color]::FromArgb(33, 166, 117)) -Glyph ""
-  offline = ConvertTo-Icon -Color ([System.Drawing.Color]::FromArgb(99, 102, 108)) -Glyph "!"
-  needsModel = ConvertTo-Icon -Color ([System.Drawing.Color]::FromArgb(219, 132, 35)) -Glyph "?"
-  restricted = ConvertTo-Icon -Color ([System.Drawing.Color]::FromArgb(188, 57, 57)) -Glyph "X"
+  available = ConvertTo-Icon -Color ([System.Drawing.Color]::FromArgb(33, 166, 117)) -Symbol "check"
+  offline = ConvertTo-Icon -Color ([System.Drawing.Color]::FromArgb(188, 57, 57)) -Symbol "x"
+  needsModel = ConvertTo-Icon -Color ([System.Drawing.Color]::FromArgb(219, 132, 35)) -Symbol "?"
+  restricted = ConvertTo-Icon -Color ([System.Drawing.Color]::FromArgb(188, 57, 57)) -Symbol "x"
 }
 
 $notifyIcon = [System.Windows.Forms.NotifyIcon]::new()
@@ -187,14 +202,13 @@ function Update-TrayVisual {
     return
   }
 
+  $notifyIcon.Icon = $icons.available
   if ($Status.loaded) {
-    $notifyIcon.Icon = $icons.awake
     $statusItem.Text = "$title is awake"
     $notifyIcon.Text = "Hearthboard: Jody AI awake"
     return
   }
 
-  $notifyIcon.Icon = $icons.sleeping
   $statusItem.Text = "$title is sleeping"
   $notifyIcon.Text = "Hearthboard: Jody AI sleeping"
 }

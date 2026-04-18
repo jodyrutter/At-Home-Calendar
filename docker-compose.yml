@@ -35,6 +35,8 @@ services:
       - type: bind
         source: D:/Home/Phone-photos-Quarantine
         target: /libraries/phone-quarantine
+    ports:
+      - "127.0.0.1:42070:42069"
     restart: unless-stopped
   caddy:
     image: caddy:2.10-alpine
