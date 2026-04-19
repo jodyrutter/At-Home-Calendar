@@ -159,6 +159,7 @@ function defaultData() {
       users: [],
       sessions: [],
       devices: [],
+      notificationDismissals: [],
       localAi: {
         allowed: true,
         updatedAt: null,
@@ -343,6 +344,12 @@ for (const user of db.data.security.users) {
   user.email = String(user.email || "").trim();
   user.phone = String(user.phone || "").trim();
   user.passwordHash = user.passwordHash || null;
+  user.avatar = user.avatar && typeof user.avatar === "object"
+    ? {
+        libraryId: String(user.avatar.libraryId || "").trim(),
+        path: String(user.avatar.path || "").replaceAll("\\", "/").replace(/^\/+/, "")
+      }
+    : null;
   user.permissionLevel = PERMISSION_LEVELS.includes(String(user.permissionLevel || "").trim().toLowerCase())
     ? String(user.permissionLevel || "").trim().toLowerCase()
     : user.role === "admin"
@@ -363,6 +370,7 @@ if (!adminUser) {
     householdMember: true,
     email: "",
     phone: "",
+    avatar: null,
     passwordHash: db.data.security.remoteAccess.passwordHash || null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -410,6 +418,18 @@ db.data.security.sessions = db.data.security.sessions.filter((session) => {
 for (const session of db.data.security.sessions) {
   authSessions.set(session.token, session);
 }
+
+if (!Array.isArray(db.data.security.notificationDismissals)) {
+  db.data.security.notificationDismissals = [];
+}
+
+db.data.security.notificationDismissals = db.data.security.notificationDismissals
+  .map((entry) => ({
+    id: String(entry?.id || "").trim(),
+    userId: String(entry?.userId || "").trim(),
+    dismissedAt: String(entry?.dismissedAt || "").trim() || new Date().toISOString()
+  }))
+  .filter((entry) => entry.id && entry.userId);
 
 for (const device of db.data.security.devices) {
   if (!device || typeof device !== "object") {
@@ -673,7 +693,7 @@ function snapshot(request = null) {
     storage: {
       driver: db.driver
     },
-    currentUser: request ? userSummary(authenticatedUser(request)) : null
+    currentUser: request ? userSummary(authenticatedUser(request), request) : null
   };
 }
 
@@ -683,6 +703,10 @@ function remoteAccessConfig() {
 
 function users() {
   return db.data.security.users;
+}
+
+function notificationDismissals() {
+  return db.data.security.notificationDismissals;
 }
 
 function memberByUserId(userId) {
@@ -706,7 +730,48 @@ function passwordConfigured() {
   return Boolean(adminUserAccount()?.passwordHash);
 }
 
-function userSummary(user) {
+function userAvatarSummary(user, request = null) {
+  if (!user?.avatar?.libraryId || !user?.avatar?.path) {
+    return {
+      kind: "initial",
+      initial: prettifyUsername(user?.username).charAt(0).toUpperCase() || "H"
+    };
+  }
+
+  const library = getMediaLibrary(user.avatar.libraryId);
+  if (!library) {
+    return {
+      kind: "initial",
+      initial: prettifyUsername(user?.username).charAt(0).toUpperCase() || "H"
+    };
+  }
+
+  if (request && !requestCanAccessMediaLibrary(request, library)) {
+    return {
+      kind: "initial",
+      initial: prettifyUsername(user?.username).charAt(0).toUpperCase() || "H"
+    };
+  }
+
+  const resolvedPath = resolveMediaPath(library, user.avatar.path);
+  if (!resolvedPath || mediaTypeForExtension(path.extname(resolvedPath)) !== "image") {
+    return {
+      kind: "initial",
+      initial: prettifyUsername(user?.username).charAt(0).toUpperCase() || "H"
+    };
+  }
+
+  return {
+    kind: "image",
+    initial: prettifyUsername(user?.username).charAt(0).toUpperCase() || "H",
+    libraryId: library.id,
+    path: user.avatar.path,
+    thumbnailUrl: buildThumbnailUrl(library.id, user.avatar.path),
+    imageUrl: buildMediaUrl(library.id, user.avatar.path)
+  };
+}
+
+function userSummary(user, request = null) {
   if (!user) {
     return null;
   }
@@ -723,9 +788,54 @@ function userSummary(user) {
     memberName: member?.name || prettifyUsername(user.username),
     email: String(user.email || "").trim(),
     phone: String(user.phone || "").trim(),
+    avatar: userAvatarSummary(user, request),
     createdAt: user.createdAt || null,
     updatedAt: user.updatedAt || null
   };
+}
+
+function notificationFeedId(user, reminder) {
+  return `${user.id}:${reminder.reminderId}:${reminder.updatedAt || reminder.eventStart || ""}`;
+}
+
+function dismissedNotificationIdSet(userId) {
+  return new Set(notificationDismissals()
+    .filter((entry) => entry.userId === userId)
+    .map((entry) => entry.id));
+}
+
+function notificationFeedForUser(user) {
+  if (!user) {
+    return [];
+  }
+
+  const dismissedIds = dismissedNotificationIdSet(user.id);
+  return upcomingReminderEntriesForUser(user)
+    .map((reminder) => {
+      const id = notificationFeedId(user, reminder);
+      return {
+        id,
+        reminderId: reminder.reminderId,
+        eventId: reminder.eventId,
+        eventTitle: reminder.eventTitle,
+        title: reminder.title,
+        body: reminder.body,
+        scheduledAt: reminder.scheduleAt,
+        offsetLabel: reminder.offsetLabel,
+        category: reminder.category,
+        location: reminder.location,
+        eventStart: reminder.eventStart,
+        annoyLevel: reminder.annoyLevel,
+        aiGenerated: reminder.aiGenerated,
+        url: reminder.eventUrl,
+        dismissed: dismissedIds.has(id)
+      };
+    })
+    .sort((left, right) => new Date(left.scheduledAt).getTime() - new Date(right.scheduledAt).getTime());
+}
+
+function unreadNotificationCountForUser(user) {
+  return notificationFeedForUser(user).filter((entry) => !entry.dismissed).length;
 }
 
 function notificationTargetUsers() {
@@ -3347,7 +3457,11 @@ function requestGuardForPath(request) {
     return null;
   }
 
-  if (requestPath === "/account" || requestPath.startsWith("/api/account/")) {
+  if (
+    requestPath === "/account" ||
+    requestPath === "/notifications" ||
+    requestPath.startsWith("/api/account/")
+  ) {
     return {
       kind: "authenticated",
       message: "Sign in to open your account page."
@@ -3467,7 +3581,7 @@ app.get("/api/session", (request, response) => {
     localMachine: requestIsLocalMachine(request),
     canSelfRegister: requestCanSelfRegister(request),
     authenticated: requestIsAuthenticated(request),
-    user: userSummary(authenticatedUser(request))
+    user: userSummary(authenticatedUser(request), request)
   });
 });
 
@@ -3514,6 +3628,7 @@ app.post("/api/session/register", async (request, response) => {
     householdMember: false,
     email: "",
     phone: "",
+    avatar: null,
     passwordHash: hashPassword(password),
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -3527,7 +3642,7 @@ app.post("/api/session/register", async (request, response) => {
   setAuthCookie(request, response, sessionToken, rememberMe);
   return response.status(201).json({
     ok: true,
-    user: userSummary(user)
+    user: userSummary(user, request)
   });
 });
 
@@ -3553,7 +3668,7 @@ app.post("/api/session/login", async (request, response) => {
   setAuthCookie(request, response, sessionToken, rememberMe);
   return response.json({
     ok: true,
-    user: userSummary(user)
+    user: userSummary(user, request)
   });
 });
 
@@ -3569,7 +3684,7 @@ app.get("/api/account", (request, response) => {
   }
 
   response.json({
-    user: userSummary(user),
+    user: userSummary(user, request),
     isAdmin: user.role === "admin",
     pageVisibility: user.role === "admin" ? Object.fromEntries(PAGE_KEYS.map((pageKey) => [pageKey, pageVisibility(pageKey)])) : null,
     libraryVisibility: user.role === "admin"
@@ -3601,10 +3716,46 @@ app.get("/api/account", (request, response) => {
   });
 });
 
+app.get("/api/nav", (request, response) => {
+  const user = authenticatedUser(request);
+  response.json({
+    authenticated: Boolean(user),
+    user: userSummary(user, request),
+    unreadNotifications: user ? unreadNotificationCountForUser(user) : 0
+  });
+});
+
 app.patch("/api/account/profile", async (request, response) => {
   const user = authenticatedUser(request);
   if (!user) {
     return response.status(401).json({ error: "Sign in to update your profile." });
+  }
+
+  const avatarPayload = request.body?.avatar;
+  if (avatarPayload !== undefined) {
+    if (avatarPayload === null) {
+      user.avatar = null;
+    } else {
+      const library = getMediaLibrary(avatarPayload?.libraryId);
+      const relativePath = String(avatarPayload?.path || "").replaceAll("\\", "/").replace(/^\/+/, "");
+      if (!library || !relativePath) {
+        return response.status(400).json({ error: "Choose a valid gallery image for your avatar." });
+      }
+
+      if (!requestCanAccessMediaLibrary(request, library)) {
+        return response.status(403).json({ error: "You can only use images from galleries you can access." });
+      }
+
+      const file = await getMediaFileForRequest(library, relativePath);
+      if (file.error || file.mediaType !== "image") {
+        return response.status(400).json({ error: "Choose an image file for your avatar." });
+      }
+
+      user.avatar = {
+        libraryId: library.id,
+        path: relativeMediaPath(library, file.resolvedPath)
+      };
+    }
   }
 
   user.email = String(request.body?.email || "").trim();
@@ -3614,7 +3765,7 @@ app.patch("/api/account/profile", async (request, response) => {
 
   return response.json({
     ok: true,
-    user: userSummary(user)
+    user: userSummary(user, request)
   });
 });
 
@@ -3643,6 +3794,48 @@ app.patch("/api/account/password", async (request, response) => {
   }
 
   await db.write();
+  return response.json({ ok: true });
+});
+
+app.get("/api/account/notifications", (request, response) => {
+  const user = authenticatedUser(request);
+  if (!user) {
+    return response.status(401).json({ error: "Sign in to open your notifications." });
+  }
+
+  const notifications = notificationFeedForUser(user);
+  response.json({
+    user: userSummary(user, request),
+    unreadCount: notifications.filter((entry) => !entry.dismissed).length,
+    notifications
+  });
+});
+
+app.post("/api/account/notifications/:notificationId/dismiss", async (request, response) => {
+  const user = authenticatedUser(request);
+  if (!user) {
+    return response.status(401).json({ error: "Sign in to manage your notifications." });
+  }
+
+  const notificationId = String(request.params.notificationId || "").trim();
+  if (!notificationId) {
+    return response.status(400).json({ error: "Choose a valid notification to dismiss." });
+  }
+
+  const exists = notificationFeedForUser(user).some((entry) => entry.id === notificationId);
+  if (!exists) {
+    return response.status(404).json({ error: "That notification is not available anymore." });
+  }
+
+  if (!notificationDismissals().some((entry) => entry.userId === user.id && entry.id === notificationId)) {
+    notificationDismissals().push({
+      id: notificationId,
+      userId: user.id,
+      dismissedAt: new Date().toISOString()
+    });
+    await db.write();
+  }
+
   return response.json({ ok: true });
 });
 
@@ -3720,7 +3913,7 @@ app.get("/api/auth/status", (request, response) => {
     localNetwork: requestIsLan(request),
     localMachine: requestIsLocalMachine(request),
     authenticated: requestIsAuthenticated(request),
-    user: userSummary(authenticatedUser(request)),
+    user: userSummary(authenticatedUser(request), request),
     passwordConfigured: passwordConfigured(),
     protectedPages: remoteAccessConfig().protectedPages
   });
@@ -3746,7 +3939,7 @@ app.post("/api/auth/login", async (request, response) => {
   setAuthCookie(request, response, sessionToken, rememberMe);
   return response.json({
     ok: true,
-    user: userSummary(user)
+    user: userSummary(user, request)
   });
 });
 
@@ -3795,7 +3988,7 @@ app.get("/api/media/libraries", (request, response) => {
   response.json({
     libraries: accessibleLibraries.map((library) => mediaLibrarySummaryForRequest(request, library)),
     authenticated: requestIsAuthenticated(request),
-    user: userSummary(authenticatedUser(request)),
+    user: userSummary(authenticatedUser(request), request),
     lockedLibraryCount: Math.max(mediaLibraries.length - accessibleLibraries.length, 0)
   });
 });
@@ -4516,6 +4709,10 @@ app.get("/gallery", (_request, response) => {
   response.sendFile(path.join(__dirname, "public", "gallery.html"));
 });
 
+app.get("/calendar/studio", (_request, response) => {
+  response.sendFile(path.join(__dirname, "public", "event-studio.html"));
+});
+
 app.get("/login", (_request, response) => {
   response.sendFile(path.join(__dirname, "public", "login.html"));
 });
@@ -4531,6 +4728,10 @@ app.get("/assistant", (_request, response) => {
 
 app.get("/account", (_request, response) => {
   response.sendFile(path.join(__dirname, "public", "account.html"));
+});
+
+app.get("/notifications", (_request, response) => {
+  response.sendFile(path.join(__dirname, "public", "notifications.html"));
 });
 
 app.use((request, response, next) => {

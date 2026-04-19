@@ -13,7 +13,13 @@ const PERMISSION_LABELS = {
 
 const state = {
   account: null,
-  activeAdminTab: "visibility"
+  activeAdminTab: "visibility",
+  avatarLibraries: [],
+  avatarLibraryId: "",
+  avatarPath: "",
+  avatarCurrentPath: "",
+  avatarFolders: [],
+  avatarImages: []
 };
 
 const elements = {
@@ -30,6 +36,16 @@ const elements = {
   profilePhone: document.querySelector("#profile-phone"),
   profileError: document.querySelector("#profile-error"),
   profileSuccess: document.querySelector("#profile-success"),
+  avatarPreview: document.querySelector("#avatar-preview"),
+  avatarPreviewFallback: document.querySelector("#avatar-preview-fallback"),
+  avatarPreviewImage: document.querySelector("#avatar-preview-image"),
+  avatarClear: document.querySelector("#avatar-clear"),
+  avatarSave: document.querySelector("#avatar-save"),
+  avatarError: document.querySelector("#avatar-error"),
+  avatarSuccess: document.querySelector("#avatar-success"),
+  avatarLibraryTabs: document.querySelector("#avatar-library-tabs"),
+  avatarFolderList: document.querySelector("#avatar-folder-list"),
+  avatarImageGrid: document.querySelector("#avatar-image-grid"),
   passwordForm: document.querySelector("#password-form"),
   passwordError: document.querySelector("#password-error"),
   passwordSuccess: document.querySelector("#password-success"),
@@ -73,6 +89,180 @@ function clearMessage(element) {
 function showMessage(element, message) {
   element.hidden = false;
   element.textContent = message;
+}
+
+function avatarInitial() {
+  const username = state.account?.user?.username || "h";
+  return username.charAt(0).toUpperCase() || "H";
+}
+
+function activeAvatarLibrary() {
+  return state.avatarLibraries.find((library) => library.id === state.avatarLibraryId) || null;
+}
+
+function stagedAvatar() {
+  if (!state.avatarLibraryId || !state.avatarPath) {
+    return null;
+  }
+
+  const file = state.avatarImages.find((entry) => entry.path === state.avatarPath);
+  if (!file) {
+    return null;
+  }
+
+  return {
+    kind: "image",
+    thumbnailUrl: file.thumbnailUrl || file.url,
+    imageUrl: file.url
+  };
+}
+
+function renderAvatarPreview(avatar = null) {
+  const selected = avatar || stagedAvatar() || state.account?.user?.avatar || null;
+  elements.avatarPreviewFallback.textContent = avatarInitial();
+
+  if (selected?.kind === "image" && (selected.thumbnailUrl || selected.imageUrl)) {
+    elements.avatarPreviewImage.hidden = false;
+    elements.avatarPreviewImage.src = selected.thumbnailUrl || selected.imageUrl;
+    elements.avatarPreviewFallback.hidden = true;
+    return;
+  }
+
+  elements.avatarPreviewImage.hidden = true;
+  elements.avatarPreviewImage.removeAttribute("src");
+  elements.avatarPreviewFallback.hidden = false;
+}
+
+function renderAvatarFolders() {
+  if (!elements.avatarFolderList) {
+    return;
+  }
+
+  elements.avatarFolderList.innerHTML = "";
+
+  const rootButton = document.createElement("button");
+  rootButton.type = "button";
+  rootButton.className = "breadcrumb-button";
+  rootButton.textContent = activeAvatarLibrary()?.label || "Library";
+  rootButton.addEventListener("click", () => {
+    browseAvatarLibrary("");
+  });
+  elements.avatarFolderList.append(rootButton);
+
+  state.avatarFolders.forEach((folder) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "breadcrumb-button";
+    button.textContent = folder.name;
+    button.addEventListener("click", () => {
+      browseAvatarLibrary(folder.path);
+    });
+    elements.avatarFolderList.append(button);
+  });
+}
+
+function renderAvatarImages() {
+  if (!elements.avatarImageGrid) {
+    return;
+  }
+
+  elements.avatarImageGrid.innerHTML = "";
+
+  if (!state.avatarImages.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.innerHTML = "<p>No images were found in this folder.</p>";
+    elements.avatarImageGrid.append(empty);
+    return;
+  }
+
+  state.avatarImages.forEach((file) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "avatar-image-option";
+    button.dataset.active = String(file.path === state.avatarPath);
+    button.innerHTML = `
+      <img src="${file.thumbnailUrl || file.url}" alt="${file.name}" />
+      <span>${file.name}</span>
+    `;
+    button.addEventListener("click", () => {
+      state.avatarPath = file.path;
+      renderAvatarImages();
+      renderAvatarPreview({
+        kind: "image",
+        thumbnailUrl: file.thumbnailUrl || file.url,
+        imageUrl: file.url
+      });
+      clearMessage(elements.avatarError);
+    });
+    elements.avatarImageGrid.append(button);
+  });
+}
+
+function renderAvatarLibraries() {
+  if (!elements.avatarLibraryTabs) {
+    return;
+  }
+
+  elements.avatarLibraryTabs.innerHTML = "";
+
+  state.avatarLibraries.forEach((library) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "member-chip";
+    button.dataset.active = String(library.id === state.avatarLibraryId);
+    button.textContent = library.label;
+    button.addEventListener("click", () => {
+      if (state.avatarLibraryId === library.id) {
+        return;
+      }
+
+      state.avatarLibraryId = library.id;
+      state.avatarPath = "";
+      browseAvatarLibrary("");
+    });
+    elements.avatarLibraryTabs.append(button);
+  });
+}
+
+async function browseAvatarLibrary(relativePath = "") {
+  if (!state.avatarLibraryId) {
+    return;
+  }
+
+  const payload = await api(`/api/media/browse?library=${encodeURIComponent(state.avatarLibraryId)}&path=${encodeURIComponent(relativePath)}&type=image&page=1&pageSize=24`);
+  state.avatarCurrentPath = payload.currentPath || "";
+  state.avatarFolders = payload.directories || [];
+  state.avatarImages = payload.files || [];
+  renderAvatarLibraries();
+  renderAvatarFolders();
+  renderAvatarImages();
+  renderAvatarPreview();
+}
+
+async function loadAvatarLibraries() {
+  const payload = await api("/api/media/libraries");
+  state.avatarLibraries = payload.libraries || [];
+
+  if (!state.avatarLibraries.length) {
+    renderAvatarLibraries();
+    renderAvatarFolders();
+    renderAvatarImages();
+    return;
+  }
+
+  const preferredLibrary = state.account?.user?.avatar?.libraryId;
+  state.avatarLibraryId = state.avatarLibraries.some((library) => library.id === preferredLibrary)
+    ? preferredLibrary
+    : state.avatarLibraries[0].id;
+  state.avatarPath = state.account?.user?.avatar?.path || "";
+  await browseAvatarLibrary(state.account?.user?.avatar?.path ? pathDirectory(state.account.user.avatar.path) : "");
+}
+
+function pathDirectory(value = "") {
+  const normalized = String(value || "").replaceAll("\\", "/");
+  const lastSlash = normalized.lastIndexOf("/");
+  return lastSlash >= 0 ? normalized.slice(0, lastSlash) : "";
 }
 
 function renderSummary(user) {
@@ -397,6 +587,7 @@ function render() {
   renderSummary(user);
   elements.profileEmail.value = user.email || "";
   elements.profilePhone.value = user.phone || "";
+  renderAvatarPreview(user.avatar || null);
   elements.adminPanel.hidden = !isAdmin;
 
   if (isAdmin) {
@@ -417,6 +608,8 @@ function render() {
 async function loadAccount() {
   state.account = await api("/api/account");
   render();
+  await loadAvatarLibraries();
+  window.dispatchEvent(new Event("hearthboard:nav-refresh"));
 }
 
 elements.refresh?.addEventListener("click", () => {
@@ -452,9 +645,44 @@ elements.profileForm?.addEventListener("submit", async (event) => {
     });
     state.account.user = payload.user;
     render();
+    window.dispatchEvent(new Event("hearthboard:nav-refresh"));
     showMessage(elements.profileSuccess, "Profile updated.");
   } catch (error) {
     showMessage(elements.profileError, error.message);
+  }
+});
+
+elements.avatarClear?.addEventListener("click", () => {
+  clearMessage(elements.avatarError);
+  clearMessage(elements.avatarSuccess);
+  state.avatarPath = "";
+  renderAvatarImages();
+  renderAvatarPreview(null);
+});
+
+elements.avatarSave?.addEventListener("click", async () => {
+  clearMessage(elements.avatarError);
+  clearMessage(elements.avatarSuccess);
+
+  try {
+    const avatar = state.avatarLibraryId && state.avatarPath
+      ? { libraryId: state.avatarLibraryId, path: state.avatarPath }
+      : null;
+    const payload = await api("/api/account/profile", {
+      method: "PATCH",
+      body: JSON.stringify({
+        email: elements.profileEmail.value,
+        phone: elements.profilePhone.value,
+        avatar
+      })
+    });
+    state.account.user = payload.user;
+    render();
+    await loadAvatarLibraries();
+    window.dispatchEvent(new Event("hearthboard:nav-refresh"));
+    showMessage(elements.avatarSuccess, avatar ? "Portrait updated." : "Portrait reset to your initial.");
+  } catch (error) {
+    showMessage(elements.avatarError, error.message);
   }
 });
 

@@ -18,22 +18,34 @@
   </head>
   <body>
     <div class="page-shell">
-      <nav class="site-nav card" aria-label="Primary">
+      <nav class="site-nav card" aria-label="Primary" data-active-page="account">
         <a class="nav-brand" href="/">Hearthboard</a>
         <div class="nav-tools">
           <div class="nav-links">
             <a class="nav-link" href="/">Calendar</a>
             <a class="nav-link" href="/gallery">Gallery</a>
             <a class="nav-link" href="/assistant">Jody AI</a>
-            <a class="nav-link is-active" href="/account">Account</a>
           </div>
-          <label class="theme-toggle" aria-label="Toggle dark mode">
-            <span class="theme-toggle-copy">Night mode</span>
-            <input class="theme-toggle-input" type="checkbox" data-theme-toggle />
-            <span class="theme-toggle-track" aria-hidden="true">
-              <span class="theme-toggle-thumb"></span>
-            </span>
-          </label>
+          <div class="nav-actions">
+            <a class="nav-icon-button" href="/notifications" data-nav-bell hidden aria-label="Notifications">
+              <span class="nav-icon-badge" data-nav-notification-count hidden></span>
+              <svg viewBox="0 0 24 24" role="presentation" focusable="false">
+                <path d="M12 3a5 5 0 0 0-5 5v2.3c0 .7-.2 1.3-.6 1.8L5 14.1V16h14v-1.9l-1.4-2a3 3 0 0 1-.6-1.8V8a5 5 0 0 0-5-5Zm0 19a3 3 0 0 1-2.8-2h5.6A3 3 0 0 1 12 22Z"></path>
+              </svg>
+            </a>
+            <a class="nav-avatar-button is-active" href="/account" data-nav-avatar hidden aria-label="Account">
+              <span data-nav-avatar-fallback>H</span>
+              <img data-nav-avatar-image alt="" hidden />
+            </a>
+            <a class="nav-login-link button button-secondary" href="/login" data-nav-login hidden>Sign in</a>
+            <label class="theme-toggle" aria-label="Toggle dark mode">
+              <span class="theme-toggle-copy">Night mode</span>
+              <input class="theme-toggle-input" type="checkbox" data-theme-toggle />
+              <span class="theme-toggle-track" aria-hidden="true">
+                <span class="theme-toggle-thumb"></span>
+              </span>
+            </label>
+          </div>
         </div>
       </nav>
 
@@ -81,6 +93,42 @@
               <button class="button button-primary" type="submit">Save profile</button>
             </div>
           </form>
+        </section>
+
+        <section class="card account-panel">
+          <div class="panel-header tight">
+            <div>
+              <p class="meta-label">Identity</p>
+              <h2>Account button portrait</h2>
+            </div>
+          </div>
+          <div class="avatar-picker-layout">
+            <div class="avatar-preview-shell">
+              <div id="avatar-preview" class="account-avatar-preview">
+                <span id="avatar-preview-fallback">H</span>
+                <img id="avatar-preview-image" alt="" hidden />
+              </div>
+              <p class="muted">Pick any image from a gallery you can already see, or fall back to your initial.</p>
+              <div class="avatar-picker-actions">
+                <button id="avatar-clear" class="button button-secondary" type="button">Use initial</button>
+                <button id="avatar-save" class="button button-primary" type="button">Save portrait</button>
+              </div>
+              <p id="avatar-error" class="form-error" hidden></p>
+              <p id="avatar-success" class="form-success" hidden></p>
+            </div>
+
+            <div class="avatar-browser">
+              <div class="avatar-browser-head">
+                <div>
+                  <p class="meta-label">Accessible galleries</p>
+                  <h3>Choose a source</h3>
+                </div>
+                <div id="avatar-library-tabs" class="member-filters"></div>
+              </div>
+              <div id="avatar-folder-list" class="breadcrumbs avatar-folder-list"></div>
+              <div id="avatar-image-grid" class="avatar-image-grid"></div>
+            </div>
+          </div>
         </section>
 
         <section class="card account-panel">
@@ -170,6 +218,7 @@
 
     <script type="module" src="/theme.js"></script>
     <script type="module" src="/mobile-bridge.js"></script>
+    <script type="module" src="/nav.js"></script>
     <script type="module" src="/account.js"></script>
   </body>
 </html>

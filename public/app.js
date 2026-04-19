@@ -1,21 +1,18 @@
+const searchParams = new URLSearchParams(window.location.search);
+
 const state = {
   householdName: "",
   timezone: "",
   members: [],
   events: [],
   bulletins: [],
-  notificationTargets: [],
-  reminderOptions: [],
-  annoyIntervalOptions: [],
-  annoyLevelOptions: [],
   currentUser: null,
-  selectedDate: toDateKey(new Date()),
-  visibleMonth: startOfMonth(new Date()),
+  selectedDate: searchParams.get("date") || toDateKey(new Date()),
+  visibleMonth: startOfMonth(searchParams.get("date") ? parseDateKey(searchParams.get("date")) : new Date()),
   activeFilters: new Set(),
-  editingEventId: null,
-  editingBulletinId: null,
   filtersInitialized: false,
-  highlightedEventId: new URLSearchParams(window.location.search).get("event") || ""
+  editingBulletinId: null,
+  highlightedEventId: searchParams.get("event") || ""
 };
 
 const weekdayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -34,32 +31,9 @@ const elements = {
   memberFilters: document.querySelector("#member-filters"),
   memberList: document.querySelector("#member-list"),
   bulletinModal: document.querySelector("#bulletin-modal"),
-  eventForm: document.querySelector("#event-form"),
   bulletinForm: document.querySelector("#bulletin-form"),
-  eventModalTitle: document.querySelector("#event-modal-title"),
-  eventStudioKicker: document.querySelector("#event-studio-kicker"),
-  eventStudioState: document.querySelector("#event-studio-state"),
-  eventStudioCard: document.querySelector("#event-studio-card"),
   bulletinModalTitle: document.querySelector("#bulletin-modal-title"),
-  deleteEvent: document.querySelector("#delete-event"),
-  resetEventFormButton: document.querySelector("#reset-event-form"),
-  saveEventButton: document.querySelector("#save-event-button"),
   deleteBulletin: document.querySelector("#delete-bulletin"),
-  memberCheckboxes: document.querySelector("#member-checkboxes"),
-  notificationsEnabled: document.querySelector("#event-notifications-enabled"),
-  notificationConfig: document.querySelector("#event-notification-config"),
-  notificationTargetCheckboxes: document.querySelector("#notification-target-checkboxes"),
-  notificationOffsetCheckboxes: document.querySelector("#notification-offset-checkboxes"),
-  annoyMode: document.querySelector("#event-annoy-mode"),
-  annoyLevelWrap: document.querySelector("#event-annoy-level-wrap"),
-  annoyLevel: document.querySelector("#event-annoy-level"),
-  aiReminderCopy: document.querySelector("#event-ai-reminders"),
-  aiUseWeb: document.querySelector("#event-ai-use-web"),
-  aiUseWebWrap: document.querySelector("#event-ai-use-web-wrap"),
-  annoyIntervalWrap: document.querySelector("#event-annoy-interval-wrap"),
-  annoyInterval: document.querySelector("#event-annoy-interval"),
-  eventFormError: document.querySelector("#event-form-error"),
-  eventFormSuccess: document.querySelector("#event-form-success"),
   bulletinFormError: document.querySelector("#bulletin-form-error"),
   emptyStateTemplate: document.querySelector("#empty-state-template")
 };
@@ -73,7 +47,7 @@ function toDateKey(date) {
 }
 
 function parseDateKey(value) {
-  const [year, month, day] = value.split("-").map(Number);
+  const [year, month, day] = String(value || "").split("-").map(Number);
   return new Date(year, month - 1, day);
 }
 
@@ -81,14 +55,6 @@ function shiftDate(date, days) {
   const next = new Date(date);
   next.setDate(next.getDate() + days);
   return next;
-}
-
-function combineDateAndTime(dateValue, timeValue, allDay, useEndOfDay = false) {
-  if (allDay) {
-    return new Date(`${dateValue}T${useEndOfDay ? "23:59" : "00:00"}:00`);
-  }
-
-  return new Date(`${dateValue}T${timeValue}:00`);
 }
 
 function formatMonthLabel(date) {
@@ -104,26 +70,17 @@ function formatEventRange(event) {
   const end = new Date(event.end);
 
   if (event.allDay) {
-    return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(start) + " all day";
+    return `${new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(start)} all day`;
   }
 
   const sameDay = toDateKey(start) === toDateKey(end);
   const timeFormat = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
-
   if (sameDay) {
     return `${timeFormat.format(start)} to ${timeFormat.format(end)}`;
   }
 
   const dateTimeFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   return `${dateTimeFormat.format(start)} to ${dateTimeFormat.format(end)}`;
-}
-
-function formatDateInput(date) {
-  return toDateKey(date);
-}
-
-function formatTimeInput(date) {
-  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
 function formatTimestamp(value) {
@@ -135,20 +92,16 @@ function formatTimestamp(value) {
   }).format(new Date(value));
 }
 
+function getMember(memberId) {
+  return state.members.find((member) => member.id === memberId);
+}
+
 function notificationTarget(targetUserId) {
-  return state.notificationTargets.find((target) => target.id === targetUserId) || null;
+  return state.notificationTargets?.find((target) => target.id === targetUserId) || null;
 }
 
 function reminderOption(offsetMinutes) {
-  return state.reminderOptions.find((option) => option.offsetMinutes === offsetMinutes) || null;
-}
-
-function annoyIntervalOption(intervalMinutes) {
-  return state.annoyIntervalOptions.find((option) => option.intervalMinutes === intervalMinutes) || null;
-}
-
-function annoyLevelOption(level) {
-  return state.annoyLevelOptions.find((option) => option.level === level) || null;
+  return state.reminderOptions?.find((option) => option.offsetMinutes === offsetMinutes) || null;
 }
 
 function eventNotificationSummary(event) {
@@ -164,15 +117,9 @@ function eventNotificationSummary(event) {
   const offsetLabels = (notifications.offsetsMinutes || [])
     .map((offsetMinutes) => reminderOption(offsetMinutes)?.label || `${offsetMinutes} min before`)
     .join(", ");
-  const annoyLabel = notifications.annoyMode
-    ? `Annoy: ${annoyLevelOption(notifications.annoyLevel)?.label || `Level ${notifications.annoyLevel || 5}`}`
-    : "";
-  const aiLabel = notifications.aiGenerated
-    ? `Jody AI: ${notifications.aiStatus === "ready" ? "ready" : notifications.aiStatus === "error" ? "retry needed" : notifications.aiStatus || "pending"}${notifications.aiUseWeb ? " + web" : ""}`
-    : "";
-  const doneLabel = state.currentUser && notifications.completedBy?.[state.currentUser.id]
-    ? "Done"
-    : "";
+  const annoyLabel = notifications.annoyMode ? `Annoy level ${notifications.annoyLevel || 5}` : "";
+  const aiLabel = notifications.aiGenerated ? `Jody AI ${notifications.aiStatus || "pending"}` : "";
+  const doneLabel = state.currentUser && notifications.completedBy?.[state.currentUser.id] ? "Done" : "";
 
   return [targetLabels ? `Notify: ${targetLabels}` : "", offsetLabels ? `When: ${offsetLabels}` : "", annoyLabel, aiLabel, doneLabel]
     .filter(Boolean)
@@ -200,10 +147,6 @@ function filteredEvents() {
   }
 
   return state.events.filter((event) => event.memberIds.some((memberId) => state.activeFilters.has(memberId)));
-}
-
-function getMember(memberId) {
-  return state.members.find((member) => member.id === memberId);
 }
 
 function categoryColor(category) {
@@ -251,8 +194,6 @@ async function loadBoard() {
   state.bulletins = payload.bulletins || [];
   state.notificationTargets = payload.notificationTargets || [];
   state.reminderOptions = payload.reminderOptions || [];
-  state.annoyIntervalOptions = payload.annoyIntervalOptions || [];
-  state.annoyLevelOptions = payload.annoyLevelOptions || [];
   state.currentUser = payload.currentUser || null;
 
   const validMemberIds = new Set(payload.members.map((member) => member.id));
@@ -263,19 +204,7 @@ async function loadBoard() {
     state.filtersInitialized = true;
   }
 
-  if (!elements.eventForm.dataset.initialized) {
-    const dateParam = new URLSearchParams(window.location.search).get("date");
-    if (dateParam) {
-      state.selectedDate = dateParam;
-      state.visibleMonth = startOfMonth(parseDateKey(dateParam));
-    }
-  }
-
   render();
-  if (!elements.eventForm.dataset.initialized) {
-    resetEventForm(state.selectedDate);
-    elements.eventForm.dataset.initialized = "true";
-  }
   window.dispatchEvent(new Event("hearthboard:mobile-sync"));
 }
 
@@ -287,23 +216,7 @@ function render() {
   renderUpcoming();
   renderBulletins();
   renderMembers();
-  renderMemberCheckboxes();
-  renderNotificationCheckboxes();
   scrollHighlightedEventIntoView();
-}
-
-function scrollHighlightedEventIntoView() {
-  if (!state.highlightedEventId) {
-    return;
-  }
-
-  const highlighted = document.querySelector(`.event-card[data-event-id="${state.highlightedEventId}"]`);
-  if (!highlighted) {
-    return;
-  }
-
-  highlighted.scrollIntoView({ behavior: "smooth", block: "center" });
-  state.highlightedEventId = "";
 }
 
 function renderHeader() {
@@ -439,7 +352,6 @@ function renderUpcoming() {
     .slice(0, 8);
 
   elements.upcomingEvents.innerHTML = "";
-
   if (upcoming.length === 0) {
     elements.upcomingEvents.append(emptyStateNode());
     return;
@@ -468,7 +380,6 @@ function renderMembers() {
 
 function renderBulletins() {
   elements.bulletinList.innerHTML = "";
-
   if (state.bulletins.length === 0) {
     const node = emptyStateNode();
     node.querySelector("p").textContent = "No household messages yet.";
@@ -481,55 +392,32 @@ function renderBulletins() {
   });
 }
 
-function renderMemberCheckboxes() {
-  elements.memberCheckboxes.innerHTML = "";
-  state.members.forEach((member) => {
-    const label = document.createElement("label");
-    label.innerHTML = `
-      <input type="checkbox" name="memberIds" value="${member.id}" />
-      <span><span class="member-swatch" style="background:${member.color}"></span>${member.name}</span>
-    `;
-    elements.memberCheckboxes.append(label);
-  });
+function currentUserCompletion(event) {
+  return state.currentUser ? event.notifications?.completedBy?.[state.currentUser.id] || null : null;
 }
 
-function renderNotificationCheckboxes() {
-  elements.notificationTargetCheckboxes.innerHTML = "";
-  elements.notificationOffsetCheckboxes.innerHTML = "";
-  elements.annoyInterval.innerHTML = "";
-  elements.annoyLevel.innerHTML = "";
+function currentUserCanComplete(event) {
+  return Boolean(state.currentUser && event.notifications?.enabled && event.notifications?.targetUserIds?.includes(state.currentUser.id));
+}
 
-  state.notificationTargets.forEach((target) => {
-    const label = document.createElement("label");
-    label.innerHTML = `
-      <input type="checkbox" name="notificationTargetUserIds" value="${target.id}" />
-      <span>${target.label}</span>
-    `;
-    elements.notificationTargetCheckboxes.append(label);
+async function setEventCompletion(eventId, completed) {
+  await api(`/api/account/events/${eventId}/completion`, {
+    method: "POST",
+    body: JSON.stringify({ completed })
   });
+  await loadBoard();
+}
 
-  state.reminderOptions.forEach((option) => {
-    const label = document.createElement("label");
-    label.innerHTML = `
-      <input type="checkbox" name="notificationOffsetsMinutes" value="${option.offsetMinutes}" />
-      <span>${option.label}</span>
-    `;
-    elements.notificationOffsetCheckboxes.append(label);
-  });
-
-  state.annoyIntervalOptions.forEach((option) => {
-    const element = document.createElement("option");
-    element.value = String(option.intervalMinutes);
-    element.textContent = option.label;
-    elements.annoyInterval.append(element);
-  });
-
-  state.annoyLevelOptions.forEach((option) => {
-    const element = document.createElement("option");
-    element.value = String(option.level);
-    element.textContent = option.label;
-    elements.annoyLevel.append(element);
-  });
+function eventStudioUrl(event = null) {
+  const url = new URL("/calendar/studio", window.location.origin);
+  url.searchParams.set("date", state.selectedDate);
+  if (event?.id) {
+    url.searchParams.set("event", event.id);
+  }
+  if (window.location.search.includes("mobileApp=1")) {
+    url.searchParams.set("mobileApp", "1");
+  }
+  return `${url.pathname}${url.search}`;
 }
 
 function eventCard(event, includeEdit = true) {
@@ -540,10 +428,7 @@ function eventCard(event, includeEdit = true) {
     article.classList.add("event-card-highlight");
   }
 
-  const assignedNames = event.memberIds
-    .map((memberId) => getMember(memberId)?.name)
-    .filter(Boolean)
-    .join(", ");
+  const assignedNames = event.memberIds.map((memberId) => getMember(memberId)?.name).filter(Boolean).join(", ");
   const completedAt = currentUserCompletion(event);
   const canComplete = currentUserCanComplete(event);
 
@@ -570,20 +455,18 @@ function eventCard(event, includeEdit = true) {
         try {
           await setEventCompletion(event.id, !completedAt);
         } catch (error) {
-          elements.eventFormError.textContent = error.message;
-          elements.eventFormError.hidden = false;
+          alert(error.message);
         }
       });
       actions.append(completeButton);
     }
 
     if (includeEdit) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "link-button";
-      button.textContent = "Edit";
-      button.addEventListener("click", () => openEventModal(event));
-      actions.append(button);
+      const editLink = document.createElement("a");
+      editLink.className = "link-button";
+      editLink.href = eventStudioUrl(event);
+      editLink.textContent = "Edit";
+      actions.append(editLink);
     }
 
     article.append(actions);
@@ -620,86 +503,18 @@ function emptyStateNode() {
   return elements.emptyStateTemplate.content.firstElementChild.cloneNode(true);
 }
 
-function currentUserCompletion(event) {
-  return state.currentUser ? event.notifications?.completedBy?.[state.currentUser.id] || null : null;
-}
-
-function currentUserCanComplete(event) {
-  return Boolean(state.currentUser && event.notifications?.enabled && event.notifications?.targetUserIds?.includes(state.currentUser.id));
-}
-
-async function setEventCompletion(eventId, completed) {
-  await api(`/api/account/events/${eventId}/completion`, {
-    method: "POST",
-    body: JSON.stringify({ completed })
-  });
-  await loadBoard();
-}
-
-function showEventStudio() {
-  if (!elements.eventStudioCard) {
+function scrollHighlightedEventIntoView() {
+  if (!state.highlightedEventId) {
     return;
   }
 
-  elements.eventStudioCard.scrollIntoView({ behavior: "smooth", block: "start" });
-  elements.eventForm.elements.title.focus({ preventScroll: true });
-}
+  const highlighted = document.querySelector(`.event-card[data-event-id="${state.highlightedEventId}"]`);
+  if (!highlighted) {
+    return;
+  }
 
-function setEventStudioMode(mode = "create") {
-  const editing = mode === "edit";
-  elements.eventStudioKicker.textContent = editing ? "Editing on the board" : "Event studio";
-  elements.eventStudioState.textContent = editing ? "Editing" : "Ready";
-  elements.eventStudioState.dataset.mode = mode;
-  elements.eventModalTitle.textContent = editing ? "Edit event" : "Add event";
-  elements.saveEventButton.textContent = editing ? "Update event" : "Save event";
-  elements.deleteEvent.hidden = !editing;
-}
-
-function clearEventMessages() {
-  elements.eventFormError.hidden = true;
-  elements.eventFormSuccess.hidden = true;
-}
-
-function setEventSubmitState(isSaving) {
-  elements.saveEventButton.disabled = isSaving;
-  elements.saveEventButton.textContent = isSaving
-    ? (state.editingEventId ? "Updating..." : "Saving...")
-    : (state.editingEventId ? "Update event" : "Save event");
-}
-
-function resetEventForm(dateValue = state.selectedDate) {
-  state.editingEventId = null;
-  clearEventMessages();
-  setEventSubmitState(false);
-  elements.eventForm.reset();
-  setEventStudioMode("create");
-
-  const date = parseDateKey(dateValue);
-  const start = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 18, 0, 0, 0);
-  const end = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 19, 0, 0, 0);
-
-  elements.eventForm.elements.title.value = "";
-  elements.eventForm.elements.date.value = formatDateInput(start);
-  elements.eventForm.elements.endDate.value = formatDateInput(end);
-  elements.eventForm.elements.startTime.value = formatTimeInput(start);
-  elements.eventForm.elements.endTime.value = formatTimeInput(end);
-  Array.from(elements.eventForm.querySelectorAll('input[name="memberIds"]')).forEach((input) => {
-    input.checked = false;
-  });
-  elements.notificationsEnabled.checked = false;
-  elements.annoyMode.checked = false;
-  elements.annoyLevel.value = "5";
-  elements.aiReminderCopy.checked = false;
-  elements.aiUseWeb.checked = false;
-  elements.annoyInterval.value = "10";
-  Array.from(elements.eventForm.querySelectorAll('input[name="notificationTargetUserIds"]')).forEach((input) => {
-    input.checked = state.currentUser ? input.value === state.currentUser.id : false;
-  });
-  Array.from(elements.eventForm.querySelectorAll('input[name="notificationOffsetsMinutes"]')).forEach((input) => {
-    input.checked = ["60", "10", "0"].includes(input.value);
-  });
-  toggleTimeFields();
-  toggleNotificationFields();
+  highlighted.scrollIntoView({ behavior: "smooth", block: "center" });
+  state.highlightedEventId = "";
 }
 
 function resetBulletinForm() {
@@ -709,51 +524,6 @@ function resetBulletinForm() {
   elements.bulletinFormError.hidden = true;
   elements.bulletinForm.reset();
   elements.bulletinForm.elements.tone.value = "Note";
-}
-
-function openEventModal(event = null) {
-  if (!event) {
-    resetEventForm();
-    showEventStudio();
-    return;
-  }
-
-  state.editingEventId = event.id;
-  clearEventMessages();
-  setEventStudioMode("edit");
-
-  const start = new Date(event.start);
-  const end = new Date(event.end);
-
-  elements.eventForm.elements.title.value = event.title;
-  elements.eventForm.elements.date.value = formatDateInput(start);
-  elements.eventForm.elements.endDate.value = formatDateInput(end);
-  elements.eventForm.elements.startTime.value = formatTimeInput(start);
-  elements.eventForm.elements.endTime.value = formatTimeInput(end);
-  elements.eventForm.elements.category.value = event.category;
-  elements.eventForm.elements.location.value = event.location || "";
-  elements.eventForm.elements.description.value = event.description || "";
-  elements.eventForm.elements.allDay.checked = Boolean(event.allDay);
-  elements.notificationsEnabled.checked = Boolean(event.notifications?.enabled);
-  elements.annoyMode.checked = Boolean(event.notifications?.annoyMode);
-  elements.annoyLevel.value = String(event.notifications?.annoyLevel || 5);
-  elements.aiReminderCopy.checked = Boolean(event.notifications?.aiGenerated);
-  elements.aiUseWeb.checked = Boolean(event.notifications?.aiUseWeb);
-  elements.annoyInterval.value = String(event.notifications?.annoyIntervalMinutes || 10);
-
-  Array.from(elements.eventForm.querySelectorAll('input[name="memberIds"]')).forEach((input) => {
-    input.checked = event.memberIds.includes(input.value);
-  });
-  Array.from(elements.eventForm.querySelectorAll('input[name="notificationTargetUserIds"]')).forEach((input) => {
-    input.checked = Boolean(event.notifications?.targetUserIds?.includes(input.value));
-  });
-  Array.from(elements.eventForm.querySelectorAll('input[name="notificationOffsetsMinutes"]')).forEach((input) => {
-    input.checked = Boolean(event.notifications?.offsetsMinutes?.includes(Number(input.value)));
-  });
-
-  toggleTimeFields();
-  toggleNotificationFields();
-  showEventStudio();
 }
 
 function openBulletinModal(bulletin = null) {
@@ -777,143 +547,6 @@ function openBulletinModal(bulletin = null) {
 
 function closeModal(modal) {
   modal.close();
-}
-
-function toggleTimeFields() {
-  const allDay = elements.eventForm.elements.allDay.checked;
-  elements.eventForm.elements.startTime.disabled = allDay;
-  elements.eventForm.elements.endTime.disabled = allDay;
-}
-
-function toggleNotificationFields() {
-  const enabled = elements.notificationsEnabled.checked;
-  elements.notificationConfig.hidden = !enabled;
-  Array.from(elements.eventForm.querySelectorAll('input[name="notificationTargetUserIds"], input[name="notificationOffsetsMinutes"]')).forEach((input) => {
-    input.disabled = !enabled;
-  });
-  elements.annoyMode.disabled = !enabled;
-  elements.annoyLevel.disabled = !enabled || !elements.annoyMode.checked;
-  elements.annoyLevelWrap.hidden = !enabled || !elements.annoyMode.checked;
-  elements.aiReminderCopy.disabled = !enabled;
-  elements.aiUseWeb.disabled = !enabled || !elements.aiReminderCopy.checked;
-  elements.aiUseWebWrap.hidden = !enabled || !elements.aiReminderCopy.checked;
-  elements.annoyInterval.disabled = true;
-  elements.annoyIntervalWrap.hidden = true;
-}
-
-async function handleEventSubmit(event) {
-  event.preventDefault();
-  clearEventMessages();
-
-  const formData = new FormData(elements.eventForm);
-  const allDay = formData.get("allDay") === "on";
-  const payload = {
-    title: String(formData.get("title") || "").trim(),
-    date: formData.get("date"),
-    endDate: formData.get("endDate"),
-    startTime: formData.get("startTime"),
-    endTime: formData.get("endTime"),
-    category: formData.get("category"),
-    location: formData.get("location"),
-    description: formData.get("description"),
-    allDay,
-    memberIds: formData.getAll("memberIds"),
-    notificationsEnabled: formData.get("notificationsEnabled") === "on",
-    notificationTargetUserIds: formData.getAll("notificationTargetUserIds"),
-    notificationOffsetsMinutes: formData.getAll("notificationOffsetsMinutes"),
-    annoyMode: formData.get("annoyMode") === "on",
-    annoyLevel: formData.get("annoyLevel"),
-    aiGenerated: formData.get("aiGenerated") === "on",
-    aiUseWeb: formData.get("aiUseWeb") === "on",
-    annoyIntervalMinutes: formData.get("annoyIntervalMinutes")
-  };
-
-  if (!payload.title) {
-    elements.eventFormError.textContent = "Event title is required.";
-    elements.eventFormError.hidden = false;
-    return;
-  }
-
-  if (!payload.date || !payload.endDate) {
-    elements.eventFormError.textContent = "Choose a start date and an end date.";
-    elements.eventFormError.hidden = false;
-    return;
-  }
-
-  if (!allDay && (!payload.startTime || !payload.endTime)) {
-    elements.eventFormError.textContent = "Choose a start and end time.";
-    elements.eventFormError.hidden = false;
-    return;
-  }
-
-  if (payload.notificationsEnabled && payload.notificationTargetUserIds.length === 0) {
-    elements.eventFormError.textContent = "Choose at least one account to notify.";
-    elements.eventFormError.hidden = false;
-    return;
-  }
-
-  if (payload.notificationsEnabled && !payload.annoyMode && payload.notificationOffsetsMinutes.length === 0) {
-    elements.eventFormError.textContent = "Choose at least one reminder time.";
-    elements.eventFormError.hidden = false;
-    return;
-  }
-
-  const startDate = combineDateAndTime(payload.date, payload.startTime || "00:00", allDay);
-  const endDate = combineDateAndTime(payload.endDate, payload.endTime || "23:59", allDay, true);
-
-  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
-    elements.eventFormError.textContent = "Start and end times must be valid.";
-    elements.eventFormError.hidden = false;
-    return;
-  }
-
-  if (endDate.getTime() < startDate.getTime()) {
-    elements.eventFormError.textContent = "Event end time must be after the start time.";
-    elements.eventFormError.hidden = false;
-    return;
-  }
-
-  const body = {
-    title: payload.title,
-    category: payload.category,
-    location: payload.location,
-    description: payload.description,
-    allDay,
-    memberIds: payload.memberIds,
-    notifications: {
-      enabled: payload.notificationsEnabled,
-      targetUserIds: payload.notificationTargetUserIds,
-      offsetsMinutes: payload.notificationOffsetsMinutes.map((value) => Number(value)),
-      annoyMode: payload.annoyMode,
-      annoyLevel: Number(payload.annoyLevel || 5),
-      aiGenerated: payload.aiGenerated,
-      aiUseWeb: payload.aiUseWeb,
-      annoyIntervalMinutes: Number(payload.annoyIntervalMinutes || 10)
-    },
-    start: startDate.toISOString(),
-    end: endDate.toISOString()
-  };
-
-  try {
-    const wasEditing = Boolean(state.editingEventId);
-    setEventSubmitState(true);
-    if (state.editingEventId) {
-      await api(`/api/events/${state.editingEventId}`, { method: "PATCH", body: JSON.stringify(body) });
-    } else {
-      await api("/api/events", { method: "POST", body: JSON.stringify(body) });
-    }
-    state.selectedDate = toDateKey(startDate);
-    state.visibleMonth = startOfMonth(startDate);
-    await loadBoard();
-    resetEventForm(toDateKey(startDate));
-    elements.eventFormSuccess.textContent = wasEditing ? "Event updated." : "Event added to the board.";
-    elements.eventFormSuccess.hidden = false;
-  } catch (error) {
-    elements.eventFormError.textContent = error.message;
-    elements.eventFormError.hidden = false;
-  } finally {
-    setEventSubmitState(false);
-  }
 }
 
 async function handleBulletinSubmit(event) {
@@ -943,18 +576,6 @@ async function handleBulletinSubmit(event) {
   }
 }
 
-async function deleteCurrentEvent() {
-  if (!state.editingEventId) {
-    return;
-  }
-
-  await api(`/api/events/${state.editingEventId}`, { method: "DELETE" });
-  await loadBoard();
-  resetEventForm();
-  elements.eventFormSuccess.textContent = "Event removed from the board.";
-  elements.eventFormSuccess.hidden = false;
-}
-
 async function deleteCurrentBulletin() {
   if (!state.editingBulletinId) {
     return;
@@ -966,7 +587,9 @@ async function deleteCurrentBulletin() {
 }
 
 function bindEvents() {
-  document.querySelector("#open-create").addEventListener("click", () => openEventModal());
+  document.querySelector("#open-create").addEventListener("click", () => {
+    window.location.href = eventStudioUrl();
+  });
   document.querySelector("#open-bulletin-modal").addEventListener("click", () => openBulletinModal());
   document.querySelector("#jump-today").addEventListener("click", () => {
     state.selectedDate = toDateKey(new Date());
@@ -983,26 +606,9 @@ function bindEvents() {
   });
   document.querySelector("#close-bulletin-modal").addEventListener("click", () => closeModal(elements.bulletinModal));
   document.querySelectorAll("[data-close-dialog]").forEach((button) => {
-    button.addEventListener("click", () => {
-      closeModal(document.querySelector(`#${button.dataset.closeDialog}`));
-    });
+    button.addEventListener("click", () => closeModal(document.querySelector(`#${button.dataset.closeDialog}`)));
   });
-
-  elements.eventForm.addEventListener("submit", handleEventSubmit);
   elements.bulletinForm.addEventListener("submit", handleBulletinSubmit);
-  elements.resetEventFormButton.addEventListener("click", () => resetEventForm());
-  elements.eventForm.elements.allDay.addEventListener("change", toggleTimeFields);
-  elements.notificationsEnabled.addEventListener("change", toggleNotificationFields);
-  elements.annoyMode.addEventListener("change", toggleNotificationFields);
-  elements.aiReminderCopy.addEventListener("change", toggleNotificationFields);
-  elements.deleteEvent.addEventListener("click", async () => {
-    try {
-      await deleteCurrentEvent();
-    } catch (error) {
-      elements.eventFormError.textContent = error.message;
-      elements.eventFormError.hidden = false;
-    }
-  });
   elements.deleteBulletin.addEventListener("click", async () => {
     try {
       await deleteCurrentBulletin();

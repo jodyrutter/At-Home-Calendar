@@ -18,22 +18,34 @@
   </head>
   <body>
     <div class="page-shell">
-      <nav class="site-nav card" aria-label="Primary">
+      <nav class="site-nav card" aria-label="Primary" data-active-page="assistant">
         <a class="nav-brand" href="/">Hearthboard</a>
         <div class="nav-tools">
           <div class="nav-links">
             <a class="nav-link" href="/">Calendar</a>
             <a class="nav-link" href="/gallery">Gallery</a>
             <a class="nav-link is-active" href="/assistant">Jody AI</a>
-            <a class="nav-link" href="/account">Account</a>
           </div>
-          <label class="theme-toggle" aria-label="Toggle dark mode">
-            <span class="theme-toggle-copy">Night mode</span>
-            <input class="theme-toggle-input" type="checkbox" data-theme-toggle />
-            <span class="theme-toggle-track" aria-hidden="true">
-              <span class="theme-toggle-thumb"></span>
-            </span>
-          </label>
+          <div class="nav-actions">
+            <a class="nav-icon-button" href="/notifications" data-nav-bell hidden aria-label="Notifications">
+              <span class="nav-icon-badge" data-nav-notification-count hidden></span>
+              <svg viewBox="0 0 24 24" role="presentation" focusable="false">
+                <path d="M12 3a5 5 0 0 0-5 5v2.3c0 .7-.2 1.3-.6 1.8L5 14.1V16h14v-1.9l-1.4-2a3 3 0 0 1-.6-1.8V8a5 5 0 0 0-5-5Zm0 19a3 3 0 0 1-2.8-2h5.6A3 3 0 0 1 12 22Z"></path>
+              </svg>
+            </a>
+            <a class="nav-avatar-button" href="/account" data-nav-avatar hidden aria-label="Account">
+              <span data-nav-avatar-fallback>H</span>
+              <img data-nav-avatar-image alt="" hidden />
+            </a>
+            <a class="nav-login-link button button-secondary" href="/login" data-nav-login hidden>Sign in</a>
+            <label class="theme-toggle" aria-label="Toggle dark mode">
+              <span class="theme-toggle-copy">Night mode</span>
+              <input class="theme-toggle-input" type="checkbox" data-theme-toggle />
+              <span class="theme-toggle-track" aria-hidden="true">
+                <span class="theme-toggle-thumb"></span>
+              </span>
+            </label>
+          </div>
         </div>
       </nav>
 
@@ -162,6 +174,7 @@
 
     <script type="module" src="/theme.js"></script>
     <script type="module" src="/mobile-bridge.js"></script>
+    <script type="module" src="/nav.js"></script>
     <script type="module" src="/assistant.js"></script>
   </body>
 </html>

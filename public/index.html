@@ -18,55 +18,57 @@
   </head>
   <body>
     <div class="page-shell">
-      <nav class="site-nav card" aria-label="Primary">
+      <nav class="site-nav card" aria-label="Primary" data-active-page="calendar">
         <a class="nav-brand" href="/">Hearthboard</a>
         <div class="nav-tools">
           <div class="nav-links">
             <a class="nav-link is-active" href="/">Calendar</a>
             <a class="nav-link" href="/gallery">Gallery</a>
             <a class="nav-link" href="/assistant">Jody AI</a>
-            <a class="nav-link" href="/account">Account</a>
           </div>
-          <label class="theme-toggle" aria-label="Toggle dark mode">
-            <span class="theme-toggle-copy">Night mode</span>
-            <input class="theme-toggle-input" type="checkbox" data-theme-toggle />
-            <span class="theme-toggle-track" aria-hidden="true">
-              <span class="theme-toggle-thumb"></span>
-            </span>
-          </label>
+          <div class="nav-actions">
+            <a class="nav-icon-button" href="/notifications" data-nav-bell hidden aria-label="Notifications">
+              <span class="nav-icon-badge" data-nav-notification-count hidden></span>
+              <svg viewBox="0 0 24 24" role="presentation" focusable="false">
+                <path d="M12 3a5 5 0 0 0-5 5v2.3c0 .7-.2 1.3-.6 1.8L5 14.1V16h14v-1.9l-1.4-2a3 3 0 0 1-.6-1.8V8a5 5 0 0 0-5-5Zm0 19a3 3 0 0 1-2.8-2h5.6A3 3 0 0 1 12 22Z"></path>
+              </svg>
+            </a>
+            <a class="nav-avatar-button" href="/account" data-nav-avatar hidden aria-label="Account">
+              <span data-nav-avatar-fallback>H</span>
+              <img data-nav-avatar-image alt="" hidden />
+            </a>
+            <a class="nav-login-link button button-secondary" href="/login" data-nav-login hidden>Sign in</a>
+            <label class="theme-toggle" aria-label="Toggle dark mode">
+              <span class="theme-toggle-copy">Night mode</span>
+              <input class="theme-toggle-input" type="checkbox" data-theme-toggle />
+              <span class="theme-toggle-track" aria-hidden="true">
+                <span class="theme-toggle-thumb"></span>
+              </span>
+            </label>
+          </div>
         </div>
       </nav>
 
-      <header class="hero hero-calendar">
-        <div class="hero-copy">
-          <p class="eyebrow">Self-hosted household rhythm</p>
-          <h1>Hearthboard</h1>
-          <p class="hero-text">
-            One shared schedule for dinners, pickups, chores, appointments, and everything else that keeps the house moving.
-          </p>
-          <div class="hero-actions">
-            <button id="open-create" class="button button-primary" type="button">Add event</button>
-            <button id="jump-today" class="button button-secondary" type="button">Jump to today</button>
-            <a class="button button-secondary" href="/gallery">Open gallery</a>
-            <a class="button button-secondary" href="/assistant">Open Jody AI</a>
-            <a class="button button-secondary" href="/account">Open account</a>
-          </div>
-        </div>
-        <div class="hero-meta card">
-          <p class="meta-label">Live household board</p>
-          <h2 id="household-name">Loading household...</h2>
-          <p id="household-timezone" class="muted"></p>
-          <div id="summary-cards" class="summary-cards"></div>
-          <div class="hero-signal-grid" aria-hidden="true">
-            <span></span>
-            <span></span>
-            <span></span>
-          </div>
-        </div>
-      </header>
-
       <main class="layout schedule-layout">
         <section class="calendar-stage">
+          <section class="card board-brief">
+            <div class="panel-header">
+              <div>
+                <p class="meta-label">Household board</p>
+                <h1 id="household-name">Loading household...</h1>
+                <p id="household-timezone" class="muted"></p>
+              </div>
+              <div class="hero-actions">
+                <button id="open-create" class="button button-primary" type="button">Add event</button>
+                <button id="jump-today" class="button button-secondary" type="button">Jump to today</button>
+              </div>
+            </div>
+            <p class="calendar-ribbon-copy muted">
+              Keep the rhythm visible here, then jump into the event studio only when you want to create or edit something.
+            </p>
+            <div id="summary-cards" class="summary-cards"></div>
+          </section>
+
           <section class="calendar-panel card">
             <div class="panel-header">
               <div class="panel-heading">
@@ -87,7 +89,7 @@
             </div>
 
             <div class="calendar-ribbon">
-              <p class="calendar-ribbon-copy">Tap a day to focus it. Use the studio on the right to drop in events fast, then edit details whenever you need more control.</p>
+              <p class="calendar-ribbon-copy">Tap a day to focus it, filter by household member when you need to narrow the view, and open the event studio when it is time to add or edit.</p>
               <div id="member-filters" class="member-filters"></div>
             </div>
             <div class="weekday-row" id="weekday-row"></div>
@@ -115,134 +117,6 @@
         </section>
 
         <aside class="sidebar rhythm-rail">
-          <section id="event-studio-card" class="card event-studio-card">
-            <div class="panel-header tight">
-              <div>
-                <p id="event-studio-kicker" class="meta-label">Event studio</p>
-                <h2 id="event-modal-title">Add event</h2>
-              </div>
-              <span id="event-studio-state" class="studio-state-pill">Ready</span>
-            </div>
-
-            <p class="event-studio-copy muted">
-              Build the next moment on the board here. Pick a day, shape the reminder behavior, and save it straight into the household flow.
-            </p>
-
-            <form id="event-form" class="modal-form event-studio-form">
-              <div class="event-studio-grid">
-                <label>
-                  Title
-                  <input name="title" type="text" maxlength="120" required />
-                </label>
-
-                <div class="split-fields">
-                  <label>
-                    Date
-                    <input name="date" type="date" required />
-                  </label>
-                  <label>
-                    End date
-                    <input name="endDate" type="date" required />
-                  </label>
-                </div>
-
-                <label class="checkbox-field">
-                  <input name="allDay" type="checkbox" />
-                  All-day event
-                </label>
-
-                <div class="split-fields">
-                  <label>
-                    Start time
-                    <input name="startTime" type="time" required />
-                  </label>
-                  <label>
-                    End time
-                    <input name="endTime" type="time" required />
-                  </label>
-                </div>
-
-                <div class="split-fields">
-                  <label>
-                    Category
-                    <select name="category">
-                      <option>General</option>
-                      <option>Meals</option>
-                      <option>School</option>
-                      <option>Work</option>
-                      <option>Chores</option>
-                      <option>Health</option>
-                      <option>Travel</option>
-                      <option>Social</option>
-                    </select>
-                  </label>
-                  <label>
-                    Location
-                    <input name="location" type="text" maxlength="120" />
-                  </label>
-                </div>
-
-                <label>
-                  Notes
-                  <textarea name="description" rows="4" maxlength="600"></textarea>
-                </label>
-
-                <fieldset>
-                  <legend>Assign household members</legend>
-                  <div id="member-checkboxes" class="checkbox-grid"></div>
-                </fieldset>
-
-                <fieldset class="notification-fieldset">
-                  <legend>Phone reminders</legend>
-                  <label class="checkbox-field">
-                    <input id="event-notifications-enabled" name="notificationsEnabled" type="checkbox" />
-                    Send push-style phone reminders for this event
-                  </label>
-                  <div id="event-notification-config" class="stack" hidden>
-                    <div>
-                      <p class="meta-label">Who gets bugged</p>
-                      <div id="notification-target-checkboxes" class="checkbox-grid"></div>
-                    </div>
-                    <div>
-                      <p class="meta-label">When to remind them</p>
-                      <div id="notification-offset-checkboxes" class="checkbox-grid"></div>
-                    </div>
-                    <label class="checkbox-field">
-                      <input id="event-annoy-mode" name="annoyMode" type="checkbox" />
-                      Keep bugging them until the event starts
-                    </label>
-                    <label id="event-annoy-level-wrap" hidden>
-                      Annoyance level
-                      <select id="event-annoy-level" name="annoyLevel"></select>
-                    </label>
-                    <label class="checkbox-field">
-                      <input id="event-ai-reminders" name="aiGenerated" type="checkbox" />
-                      Let Jody AI write the notification messages
-                    </label>
-                    <label id="event-ai-use-web-wrap" class="checkbox-field" hidden>
-                      <input id="event-ai-use-web" name="aiUseWeb" type="checkbox" />
-                      Allow Jody AI to use web search while writing these reminders
-                    </label>
-                    <label id="event-annoy-interval-wrap" hidden>
-                      Annoy cadence
-                      <select id="event-annoy-interval" name="annoyIntervalMinutes"></select>
-                    </label>
-                    <p class="muted">These reminders sync to the Android app. Annoy mode escalates across the last 2 hours before the event, and completed tasks stop future nudges for that signed-in user.</p>
-                  </div>
-                </fieldset>
-              </div>
-
-              <p id="event-form-error" class="form-error" hidden></p>
-              <p id="event-form-success" class="form-success" hidden></p>
-
-              <div class="modal-actions">
-                <button id="delete-event" class="button button-danger" type="button" hidden>Delete</button>
-                <button id="reset-event-form" class="button button-secondary" type="button">Reset</button>
-                <button id="save-event-button" class="button button-primary" type="submit">Save event</button>
-              </div>
-            </form>
-          </section>
-
           <section class="card">
             <div class="panel-header tight">
               <div>
@@ -327,6 +201,7 @@
 
     <script type="module" src="/theme.js"></script>
     <script type="module" src="/mobile-bridge.js"></script>
+    <script type="module" src="/nav.js"></script>
     <script type="module" src="/app.js"></script>
   </body>
 </html>

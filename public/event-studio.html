@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Event Studio</title>
+    <meta name="theme-color" content="#dd6b20" />
+    <script>
+      (() => {
+        const savedTheme = localStorage.getItem("hearthboard-theme");
+        const preferredDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.dataset.theme = savedTheme || (preferredDark ? "dark" : "light");
+      })();
+    </script>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="shortcut icon" href="/favicon.svg" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <nav class="site-nav card" aria-label="Primary" data-active-page="calendar">
+        <a class="nav-brand" href="/">Hearthboard</a>
+        <div class="nav-tools">
+          <div class="nav-links">
+            <a class="nav-link is-active" href="/">Calendar</a>
+            <a class="nav-link" href="/gallery">Gallery</a>
+            <a class="nav-link" href="/assistant">Jody AI</a>
+          </div>
+          <div class="nav-actions">
+            <a class="nav-icon-button" href="/notifications" data-nav-bell hidden aria-label="Notifications">
+              <span class="nav-icon-badge" data-nav-notification-count hidden></span>
+              <svg viewBox="0 0 24 24" role="presentation" focusable="false">
+                <path d="M12 3a5 5 0 0 0-5 5v2.3c0 .7-.2 1.3-.6 1.8L5 14.1V16h14v-1.9l-1.4-2a3 3 0 0 1-.6-1.8V8a5 5 0 0 0-5-5Zm0 19a3 3 0 0 1-2.8-2h5.6A3 3 0 0 1 12 22Z"></path>
+              </svg>
+            </a>
+            <a class="nav-avatar-button" href="/account" data-nav-avatar hidden aria-label="Account">
+              <span data-nav-avatar-fallback>H</span>
+              <img data-nav-avatar-image alt="" hidden />
+            </a>
+            <a class="nav-login-link button button-secondary" href="/login" data-nav-login hidden>Sign in</a>
+            <label class="theme-toggle" aria-label="Toggle dark mode">
+              <span class="theme-toggle-copy">Night mode</span>
+              <input class="theme-toggle-input" type="checkbox" data-theme-toggle />
+              <span class="theme-toggle-track" aria-hidden="true">
+                <span class="theme-toggle-thumb"></span>
+              </span>
+            </label>
+          </div>
+        </div>
+      </nav>
+
+      <header class="hero hero-account">
+        <div class="hero-copy">
+          <p id="event-studio-kicker" class="eyebrow">Event studio</p>
+          <h1 id="event-modal-title">Add event</h1>
+          <p class="hero-text">
+            Shape the schedule here, decide who gets bugged, and then drop the event back into the household board.
+          </p>
+          <div class="hero-actions">
+            <a id="event-studio-back" class="button button-secondary" href="/">Back to calendar</a>
+          </div>
+        </div>
+        <div class="hero-meta card">
+          <p class="meta-label">Studio status</p>
+          <h2 id="event-studio-date">Preparing the day...</h2>
+          <p class="muted">You can save a quick reminder or go full chaos with AI-written annoy-mode pushes.</p>
+          <div class="summary-cards">
+            <div class="summary-card">
+              <strong id="event-studio-targets">0</strong>
+              <span>People you can notify</span>
+            </div>
+            <div class="summary-card">
+              <strong id="event-studio-reminders">0</strong>
+              <span>Reminder offsets available</span>
+            </div>
+            <div class="summary-card">
+              <strong id="event-studio-members">0</strong>
+              <span>Roster options</span>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main class="account-layout">
+        <section class="card">
+          <form id="event-form" class="modal-form event-studio-form standalone-event-form">
+            <div class="event-studio-grid">
+              <label>
+                Title
+                <input name="title" type="text" maxlength="120" required />
+              </label>
+
+              <div class="split-fields">
+                <label>
+                  Date
+                  <input name="date" type="date" required />
+                </label>
+                <label>
+                  End date
+                  <input name="endDate" type="date" required />
+                </label>
+              </div>
+
+              <label class="checkbox-field">
+                <input name="allDay" type="checkbox" />
+                All-day event
+              </label>
+
+              <div class="split-fields">
+                <label>
+                  Start time
+                  <input name="startTime" type="time" required />
+                </label>
+                <label>
+                  End time
+                  <input name="endTime" type="time" required />
+                </label>
+              </div>
+
+              <div class="split-fields">
+                <label>
+                  Category
+                  <select name="category">
+                    <option>General</option>
+                    <option>Meals</option>
+                    <option>School</option>
+                    <option>Work</option>
+                    <option>Chores</option>
+                    <option>Health</option>
+                    <option>Travel</option>
+                    <option>Social</option>
+                  </select>
+                </label>
+                <label>
+                  Location
+                  <input name="location" type="text" maxlength="120" />
+                </label>
+              </div>
+
+              <label>
+                Notes
+                <textarea name="description" rows="4" maxlength="600"></textarea>
+              </label>
+
+              <fieldset>
+                <legend>Assign household members</legend>
+                <div id="member-checkboxes" class="checkbox-grid"></div>
+              </fieldset>
+
+              <fieldset class="notification-fieldset">
+                <legend>Phone reminders</legend>
+                <label class="checkbox-field">
+                  <input id="event-notifications-enabled" name="notificationsEnabled" type="checkbox" />
+                  Send push-style phone reminders for this event
+                </label>
+                <div id="event-notification-config" class="stack" hidden>
+                  <div>
+                    <p class="meta-label">Who gets bugged</p>
+                    <div id="notification-target-checkboxes" class="checkbox-grid"></div>
+                  </div>
+                  <div>
+                    <p class="meta-label">When to remind them</p>
+                    <div id="notification-offset-checkboxes" class="checkbox-grid"></div>
+                  </div>
+                  <label class="checkbox-field">
+                    <input id="event-annoy-mode" name="annoyMode" type="checkbox" />
+                    Keep bugging them until the event starts
+                  </label>
+                  <label id="event-annoy-level-wrap" hidden>
+                    Annoyance level
+                    <select id="event-annoy-level" name="annoyLevel"></select>
+                  </label>
+                  <label class="checkbox-field">
+                    <input id="event-ai-reminders" name="aiGenerated" type="checkbox" />
+                    Let Jody AI write the notification messages
+                  </label>
+                  <label id="event-ai-use-web-wrap" class="checkbox-field" hidden>
+                    <input id="event-ai-use-web" name="aiUseWeb" type="checkbox" />
+                    Allow Jody AI to use web search while writing these reminders
+                  </label>
+                  <label id="event-annoy-interval-wrap" hidden>
+                    Annoy cadence
+                    <select id="event-annoy-interval" name="annoyIntervalMinutes"></select>
+                  </label>
+                  <p class="muted">Annoy mode escalates across the last 2 hours before the event, and completed tasks stop future nudges for that signed-in user.</p>
+                </div>
+              </fieldset>
+            </div>
+
+            <p id="event-form-error" class="form-error" hidden></p>
+            <p id="event-form-success" class="form-success" hidden></p>
+
+            <div class="modal-actions">
+              <button id="delete-event" class="button button-danger" type="button" hidden>Delete</button>
+              <button id="reset-event-form" class="button button-secondary" type="button">Reset</button>
+              <button id="save-event-button" class="button button-primary" type="submit">Save event</button>
+            </div>
+          </form>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/theme.js"></script>
+    <script type="module" src="/mobile-bridge.js"></script>
+    <script type="module" src="/nav.js"></script>
+    <script type="module" src="/event-studio.js"></script>
+  </body>
+</html>
