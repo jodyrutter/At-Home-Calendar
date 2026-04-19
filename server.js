@@ -4,8 +4,8 @@ import path from "node:path";
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { JSONFilePreset } from "lowdb/node";
 import { nanoid } from "nanoid";
+import { createPersistentStore } from "./store.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -14,7 +14,8 @@ const app = express();
 const PORT = Number(process.env.PORT || 42069);
 const HOST = process.env.HOST || "0.0.0.0";
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
-const DB_FILE = path.join(DATA_DIR, "store.json");
+const DB_FILE_NAME = "store.json";
+const DATABASE_URL = String(process.env.DATABASE_URL || "").trim();
 const THUMBNAIL_DIR = path.join(DATA_DIR, "media-thumbs");
 const VIDEO_PROXY_DIR = path.join(DATA_DIR, "video-proxies");
 const APP_TIMEZONE = process.env.APP_TIMEZONE || "America/Port-au-Prince";
@@ -50,6 +51,7 @@ const VISIBILITY_OPTIONS = new Set(["public", "trusted", "family", "admin"]);
 const PERMISSION_LEVELS = ["default", "trusted", "family", "admin"];
 const PAGE_KEYS = ["calendar", "gallery", "assistant"];
 const EVENT_NOTIFICATION_OFFSET_OPTIONS = [1440, 180, 60, 10, 0];
+const EVENT_NOTIFICATION_REPEAT_INTERVAL_OPTIONS = [5, 10, 15, 30];
 const MOBILE_REMINDER_LOOKAHEAD_DAYS = 45;
 const VISIBILITY_RANKS = new Map([
   ["public", 0],
@@ -166,7 +168,7 @@ function defaultData() {
 
 function defaultPageVisibility() {
   return {
-    calendar: { lan: "family", remote: "family" },
+    calendar: { lan: "public", remote: "family" },
     gallery: { lan: "public", remote: "public" },
     assistant: { lan: "trusted", remote: "trusted" }
   };
@@ -226,7 +228,12 @@ function normalizeUsername(value) {
 await mkdir(DATA_DIR, { recursive: true });
 await mkdir(THUMBNAIL_DIR, { recursive: true });
 await mkdir(VIDEO_PROXY_DIR, { recursive: true });
-const db = await JSONFilePreset(DB_FILE, defaultData());
+const db = await createPersistentStore({
+  dataDir: DATA_DIR,
+  fileName: DB_FILE_NAME,
+  defaultData,
+  databaseUrl: DATABASE_URL
+});
 const pendingThumbnailJobs = new Map();
 const pendingVideoVariantJobs = new Map();
 const mediaIndexCache = new Map();
@@ -296,6 +303,12 @@ if (!db.data.security.pageVisibility || typeof db.data.security.pageVisibility !
 
 for (const pageKey of PAGE_KEYS) {
   db.data.security.pageVisibility[pageKey] = clampVisibilityRule(db.data.security.pageVisibility[pageKey], defaultPageVisibility()[pageKey]);
+}
+
+// Older builds locked the calendar behind a family-only LAN rule, which broke
+// the shared on-home-network workflow the site is supposed to allow.
+if (db.data.security.pageVisibility.calendar?.lan === "family") {
+  db.data.security.pageVisibility.calendar.lan = "public";
 }
 
 if (!db.data.security.libraryVisibility || typeof db.data.security.libraryVisibility !== "object") {
@@ -636,6 +649,13 @@ function snapshot(request = null) {
       offsetMinutes,
       label: notificationOffsetLabel(offsetMinutes)
     })),
+    annoyIntervalOptions: EVENT_NOTIFICATION_REPEAT_INTERVAL_OPTIONS.map((intervalMinutes) => ({
+      intervalMinutes,
+      label: `Every ${intervalMinutes} min`
+    })),
+    storage: {
+      driver: db.driver
+    },
     currentUser: request ? userSummary(authenticatedUser(request)) : null
   };
 }
@@ -722,6 +742,11 @@ function normalizeNotificationOffsets(offsets) {
     .sort((left, right) => right - left);
 }
 
+function normalizeNotificationRepeatInterval(value, fallback = 10) {
+  const interval = Number.parseInt(String(value ?? fallback), 10);
+  return EVENT_NOTIFICATION_REPEAT_INTERVAL_OPTIONS.includes(interval) ? interval : fallback;
+}
+
 function normalizeEventNotifications(payload, existingNotifications = null) {
   const source = payload && typeof payload === "object" ? payload : {};
   const enabled = normalizeBoolean(source.enabled);
@@ -733,16 +758,91 @@ function normalizeEventNotifications(payload, existingNotifications = null) {
     ? existingNotifications?.offsetsMinutes || EVENT_NOTIFICATION_OFFSET_OPTIONS
     : [];
   const offsetsMinutes = normalizeNotificationOffsets(source.offsetsMinutes ?? fallbackOffsets);
+  const annoyMode = enabled ? normalizeBoolean(source.annoyMode ?? existingNotifications?.annoyMode) : false;
+  const annoyIntervalMinutes = normalizeNotificationRepeatInterval(
+    source.annoyIntervalMinutes ?? existingNotifications?.annoyIntervalMinutes,
+    existingNotifications?.annoyIntervalMinutes ?? 10
+  );
 
   return {
     enabled,
     targetUserIds: enabled ? targetUserIds : [],
-    offsetsMinutes: enabled ? offsetsMinutes : []
+    offsetsMinutes: enabled ? offsetsMinutes : [],
+    annoyMode: enabled ? annoyMode : false,
+    annoyIntervalMinutes: enabled ? annoyIntervalMinutes : 10
   };
 }
 
 function sanitizeStoredEventNotifications(notifications) {
   return normalizeEventNotifications(notifications, notifications);
+}
+
+function reminderTimelineEntries(event, notifications, user, now, lookaheadLimit) {
+  const eventStart = new Date(event.start);
+  if (Number.isNaN(eventStart.getTime())) {
+    return [];
+  }
+
+  const seenKeys = new Set();
+  const entries = [];
+  for (const offsetMinutes of notifications.offsetsMinutes) {
+    const triggerTimes = [new Date(eventStart.getTime() - offsetMinutes * 60 * 1000)];
+
+    if (notifications.annoyMode && notifications.annoyIntervalMinutes > 0) {
+      let nextMinutes = offsetMinutes - notifications.annoyIntervalMinutes;
+      while (nextMinutes >= 0) {
+        triggerTimes.push(new Date(eventStart.getTime() - nextMinutes * 60 * 1000));
+        nextMinutes -= notifications.annoyIntervalMinutes;
+      }
+    }
+
+    for (const triggerAt of triggerTimes) {
+      if (triggerAt < now || triggerAt > lookaheadLimit) {
+        continue;
+      }
+
+      const effectiveOffsetMinutes = Math.max(0, Math.round((eventStart.getTime() - triggerAt.getTime()) / 60000));
+      const reminderKey = `${event.id}:${user.id}:${effectiveOffsetMinutes}`;
+      if (seenKeys.has(reminderKey)) {
+        continue;
+      }
+      seenKeys.add(reminderKey);
+
+      const title = effectiveOffsetMinutes === 0 ? `${event.title} starts now` : `${event.title} is coming up`;
+      const bodyParts = [formatReminderEventTime(event)];
+      if (event.location) {
+        bodyParts.push(event.location);
+      }
+      if (effectiveOffsetMinutes > 0) {
+        bodyParts.unshift(notificationOffsetLabel(effectiveOffsetMinutes));
+      }
+      if (notifications.annoyMode && effectiveOffsetMinutes !== offsetMinutes) {
+        bodyParts.push(`Annoy mode every ${notifications.annoyIntervalMinutes} min`);
+      }
+
+      entries.push({
+        reminderId: reminderKey,
+        eventId: event.id,
+        eventTitle: event.title,
+        title,
+        body: bodyParts.filter(Boolean).join(" | "),
+        scheduleAt: triggerAt.toISOString(),
+        eventStart: event.start,
+        eventEnd: event.end,
+        offsetMinutes: effectiveOffsetMinutes,
+        offsetLabel: notificationOffsetLabel(effectiveOffsetMinutes),
+        location: event.location || "",
+        category: event.category || "General",
+        allDay: Boolean(event.allDay),
+        annoyMode: Boolean(notifications.annoyMode),
+        annoyIntervalMinutes: notifications.annoyIntervalMinutes,
+        eventUrl: "/",
+        updatedAt: event.updatedAt || event.createdAt || event.start
+      });
+    }
+  }
+
+  return entries;
 }
 
 function upcomingReminderEntriesForUser(user, now = new Date()) {
@@ -759,44 +859,7 @@ function upcomingReminderEntriesForUser(user, now = new Date()) {
         return [];
       }
 
-      const eventStart = new Date(event.start);
-      if (Number.isNaN(eventStart.getTime())) {
-        return [];
-      }
-
-      return notifications.offsetsMinutes.flatMap((offsetMinutes) => {
-        const triggerAt = new Date(eventStart.getTime() - offsetMinutes * 60 * 1000);
-        if (triggerAt < now || triggerAt > lookaheadLimit) {
-          return [];
-        }
-
-        const title = offsetMinutes === 0 ? `${event.title} starts now` : `${event.title} is coming up`;
-        const bodyParts = [formatReminderEventTime(event)];
-        if (event.location) {
-          bodyParts.push(event.location);
-        }
-        if (offsetMinutes > 0) {
-          bodyParts.unshift(notificationOffsetLabel(offsetMinutes));
-        }
-
-        return {
-          reminderId: `${event.id}:${user.id}:${offsetMinutes}`,
-          eventId: event.id,
-          eventTitle: event.title,
-          title,
-          body: bodyParts.filter(Boolean).join(" | "),
-          scheduleAt: triggerAt.toISOString(),
-          eventStart: event.start,
-          eventEnd: event.end,
-          offsetMinutes,
-          offsetLabel: notificationOffsetLabel(offsetMinutes),
-          location: event.location || "",
-          category: event.category || "General",
-          allDay: Boolean(event.allDay),
-          eventUrl: "/",
-          updatedAt: event.updatedAt || event.createdAt || event.start
-        };
-      });
+      return reminderTimelineEntries(event, notifications, user, now, lookaheadLimit);
     })
     .sort((left, right) => new Date(left.scheduleAt).getTime() - new Date(right.scheduleAt).getTime());
 }
@@ -1384,6 +1447,135 @@ async function trackDeviceRequest(request, response) {
   device.usernames = [...nextUsernames];
 
   await db.write();
+}
+
+function deviceIdentitySignature(device) {
+  const usernames = Array.isArray(device?.usernames) ? [...device.usernames].sort().join(",") : "";
+  return [
+    String(device?.label || "").trim(),
+    String(device?.host || "").trim(),
+    usernames,
+    summarizeUserAgent(String(device?.userAgent || "").trim())
+  ].join("|");
+}
+
+function groupedDeviceActivity() {
+  const groups = new Map();
+
+  for (const device of devices()) {
+    const ip = String(device.ip || "").trim() || "Unknown IP";
+    let group = groups.get(ip);
+    if (!group) {
+      group = {
+        ip,
+        totalRequests: 0,
+        authenticatedRequests: 0,
+        anonymousRequests: 0,
+        firstSeenAt: device.firstSeenAt || null,
+        lastSeenAt: device.lastSeenAt || null,
+        usernames: new Set(),
+        hostnames: new Set(),
+        identities: new Map()
+      };
+      groups.set(ip, group);
+    }
+
+    group.totalRequests += Math.max(0, Number.parseInt(String(device.visitCount || "0"), 10) || 0);
+    group.authenticatedRequests += Math.max(0, Number.parseInt(String(device.authenticatedVisitCount || "0"), 10) || 0);
+    group.anonymousRequests += Math.max(0, Number.parseInt(String(device.anonymousVisitCount || "0"), 10) || 0);
+
+    if (!group.firstSeenAt || new Date(device.firstSeenAt || 0).getTime() < new Date(group.firstSeenAt || 0).getTime()) {
+      group.firstSeenAt = device.firstSeenAt || group.firstSeenAt;
+    }
+    if (!group.lastSeenAt || new Date(device.lastSeenAt || 0).getTime() > new Date(group.lastSeenAt || 0).getTime()) {
+      group.lastSeenAt = device.lastSeenAt || group.lastSeenAt;
+    }
+
+    if (device.host) {
+      group.hostnames.add(device.host);
+    }
+
+    for (const username of Array.isArray(device.usernames) ? device.usernames : []) {
+      if (username) {
+        group.usernames.add(username);
+      }
+    }
+
+    const identityKey = deviceIdentitySignature(device);
+    let identity = group.identities.get(identityKey);
+    if (!identity) {
+      identity = {
+        key: identityKey,
+        label: String(device.label || "").trim() || "Unknown device",
+        host: String(device.host || "").trim() || "Unknown host",
+        userAgent: String(device.userAgent || "").trim(),
+        usernames: new Set(Array.isArray(device.usernames) ? device.usernames.filter(Boolean) : []),
+        requestCount: 0,
+        authenticatedRequests: 0,
+        anonymousRequests: 0,
+        firstSeenAt: device.firstSeenAt || null,
+        lastSeenAt: device.lastSeenAt || null,
+        deviceIds: new Set()
+      };
+      group.identities.set(identityKey, identity);
+    }
+
+    identity.requestCount += Math.max(0, Number.parseInt(String(device.visitCount || "0"), 10) || 0);
+    identity.authenticatedRequests += Math.max(0, Number.parseInt(String(device.authenticatedVisitCount || "0"), 10) || 0);
+    identity.anonymousRequests += Math.max(0, Number.parseInt(String(device.anonymousVisitCount || "0"), 10) || 0);
+    identity.deviceIds.add(device.id);
+    if (!identity.firstSeenAt || new Date(device.firstSeenAt || 0).getTime() < new Date(identity.firstSeenAt || 0).getTime()) {
+      identity.firstSeenAt = device.firstSeenAt || identity.firstSeenAt;
+    }
+    if (!identity.lastSeenAt || new Date(device.lastSeenAt || 0).getTime() > new Date(identity.lastSeenAt || 0).getTime()) {
+      identity.lastSeenAt = device.lastSeenAt || identity.lastSeenAt;
+    }
+    for (const username of Array.isArray(device.usernames) ? device.usernames : []) {
+      if (username) {
+        identity.usernames.add(username);
+      }
+    }
+  }
+
+  return [...groups.values()]
+    .map((group) => ({
+      ip: group.ip,
+      totalRequests: group.totalRequests,
+      authenticatedRequests: group.authenticatedRequests,
+      anonymousRequests: group.anonymousRequests,
+      firstSeenAt: group.firstSeenAt,
+      lastSeenAt: group.lastSeenAt,
+      usernames: [...group.usernames].sort(),
+      hostnames: [...group.hostnames].sort(),
+      identityCount: group.identities.size,
+      identities: [...group.identities.values()]
+        .map((identity) => ({
+          key: identity.key,
+          label: identity.label,
+          host: identity.host,
+          userAgent: identity.userAgent,
+          usernames: [...identity.usernames].sort(),
+          requestCount: identity.requestCount,
+          authenticatedRequests: identity.authenticatedRequests,
+          anonymousRequests: identity.anonymousRequests,
+          firstSeenAt: identity.firstSeenAt,
+          lastSeenAt: identity.lastSeenAt,
+          distinctDeviceCount: identity.deviceIds.size
+        }))
+        .sort((left, right) => new Date(right.lastSeenAt || 0).getTime() - new Date(left.lastSeenAt || 0).getTime())
+    }))
+    .sort((left, right) => new Date(right.lastSeenAt || 0).getTime() - new Date(left.lastSeenAt || 0).getTime());
+}
+
+function deviceActivitySummary() {
+  const grouped = groupedDeviceActivity();
+  return {
+    totalKnownIps: grouped.length,
+    totalIdentityClusters: grouped.reduce((total, group) => total + group.identityCount, 0),
+    totalAuthenticatedRequests: grouped.reduce((total, group) => total + group.authenticatedRequests, 0),
+    totalAnonymousRequests: grouped.reduce((total, group) => total + group.anonymousRequests, 0),
+    likelyPeople: new Set(grouped.flatMap((group) => group.usernames)).size
+  };
 }
 
 function authenticatedUser(request) {
@@ -2964,10 +3156,8 @@ app.get("/api/account", (request, response) => {
     libraryVisibility: user.role === "admin"
       ? Object.fromEntries(mediaLibraries.map((library) => [library.id, libraryVisibility(library)]))
       : null,
-    devices: user.role === "admin"
-      ? [...devices()]
-          .sort((left, right) => new Date(right.lastSeenAt).getTime() - new Date(left.lastSeenAt).getTime())
-      : null,
+    deviceSummary: user.role === "admin" ? deviceActivitySummary() : null,
+    devices: user.role === "admin" ? groupedDeviceActivity() : null,
     users: user.role === "admin"
       ? users()
           .map((entry) => adminManagedUserSummary(entry))

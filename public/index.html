@@ -218,6 +218,14 @@
               <p class="meta-label">When to remind them</p>
               <div id="notification-offset-checkboxes" class="checkbox-grid"></div>
             </div>
+            <label class="checkbox-field">
+              <input id="event-annoy-mode" name="annoyMode" type="checkbox" />
+              Keep bugging them until the event starts
+            </label>
+            <label id="event-annoy-interval-wrap" hidden>
+              Annoy cadence
+              <select id="event-annoy-interval" name="annoyIntervalMinutes"></select>
+            </label>
             <p class="muted">These reminders sync to the Android app and get scheduled on the phone for the selected accounts.</p>
           </div>
         </fieldset>

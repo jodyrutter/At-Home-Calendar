@@ -14,7 +14,7 @@ Hearthboard is a self-hosted household calendar and scheduling board you can run
 - Toggleable light and dark themes that persist across pages
 - Household member roster with per-person filtering
 - Event creation, editing, and deletion
-- Persistent local storage backed by a JSON data file in a Docker volume
+- PostgreSQL-backed persistent storage with automatic migration from the legacy JSON store
 - Docker and Docker Compose defaults that bind the app to port `42069`
 - HTTPS via Caddy, with a public cert for your real domain and a local cert for LAN/localhost access
 
@@ -109,12 +109,13 @@ When creating or editing an event on the calendar, you can now:
 - enable reminders for that event
 - choose which approved accounts should receive them
 - choose reminder offsets such as `1 day`, `3 hours`, `1 hour`, `10 minutes`, or `At time`
+- enable `Annoy mode` so the phone keeps nudging the selected accounts every few minutes until the event starts
 
 Those reminders are exposed through `GET /api/mobile/reminders` for the signed-in account and consumed by the Android app.
 
 ## Data persistence
 
-Calendar data is stored in the named Docker volume `hearthboard-data`. If you want a bind-mounted folder instead, replace the volume section in [docker-compose.yml](C:\Users\jody4\OneDrive\Documents\New project\docker-compose.yml) with a host path mapping.
+Application data now lives in PostgreSQL through the named Docker volume `hearthboard-postgres`. Legacy installs with `data\store.json` are migrated into PostgreSQL automatically on the first boot after this update. Gallery thumbnail and video caches still live in the named Docker volume `hearthboard-data`.
 
 ## API
 

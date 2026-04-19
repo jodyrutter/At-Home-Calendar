@@ -6,6 +6,7 @@ const state = {
   bulletins: [],
   notificationTargets: [],
   reminderOptions: [],
+  annoyIntervalOptions: [],
   currentUser: null,
   selectedDate: toDateKey(new Date()),
   visibleMonth: startOfMonth(new Date()),
@@ -43,6 +44,9 @@ const elements = {
   notificationConfig: document.querySelector("#event-notification-config"),
   notificationTargetCheckboxes: document.querySelector("#notification-target-checkboxes"),
   notificationOffsetCheckboxes: document.querySelector("#notification-offset-checkboxes"),
+  annoyMode: document.querySelector("#event-annoy-mode"),
+  annoyIntervalWrap: document.querySelector("#event-annoy-interval-wrap"),
+  annoyInterval: document.querySelector("#event-annoy-interval"),
   eventFormError: document.querySelector("#event-form-error"),
   bulletinFormError: document.querySelector("#bulletin-form-error"),
   emptyStateTemplate: document.querySelector("#empty-state-template")
@@ -127,6 +131,10 @@ function reminderOption(offsetMinutes) {
   return state.reminderOptions.find((option) => option.offsetMinutes === offsetMinutes) || null;
 }
 
+function annoyIntervalOption(intervalMinutes) {
+  return state.annoyIntervalOptions.find((option) => option.intervalMinutes === intervalMinutes) || null;
+}
+
 function eventNotificationSummary(event) {
   const notifications = event.notifications || {};
   if (!notifications.enabled) {
@@ -140,8 +148,11 @@ function eventNotificationSummary(event) {
   const offsetLabels = (notifications.offsetsMinutes || [])
     .map((offsetMinutes) => reminderOption(offsetMinutes)?.label || `${offsetMinutes} min before`)
     .join(", ");
+  const annoyLabel = notifications.annoyMode
+    ? `Annoy: ${annoyIntervalOption(notifications.annoyIntervalMinutes)?.label || `Every ${notifications.annoyIntervalMinutes || 10} min`}`
+    : "";
 
-  return [targetLabels ? `Notify: ${targetLabels}` : "", offsetLabels ? `When: ${offsetLabels}` : ""]
+  return [targetLabels ? `Notify: ${targetLabels}` : "", offsetLabels ? `When: ${offsetLabels}` : "", annoyLabel]
     .filter(Boolean)
     .join(" | ");
 }
@@ -218,6 +229,7 @@ async function loadBoard() {
   state.bulletins = payload.bulletins || [];
   state.notificationTargets = payload.notificationTargets || [];
   state.reminderOptions = payload.reminderOptions || [];
+  state.annoyIntervalOptions = payload.annoyIntervalOptions || [];
   state.currentUser = payload.currentUser || null;
 
   const validMemberIds = new Set(payload.members.map((member) => member.id));
@@ -434,6 +446,7 @@ function renderMemberCheckboxes() {
 function renderNotificationCheckboxes() {
   elements.notificationTargetCheckboxes.innerHTML = "";
   elements.notificationOffsetCheckboxes.innerHTML = "";
+  elements.annoyInterval.innerHTML = "";
 
   state.notificationTargets.forEach((target) => {
     const label = document.createElement("label");
@@ -451,6 +464,13 @@ function renderNotificationCheckboxes() {
       <span>${option.label}</span>
     `;
     elements.notificationOffsetCheckboxes.append(label);
+  });
+
+  state.annoyIntervalOptions.forEach((option) => {
+    const element = document.createElement("option");
+    element.value = String(option.intervalMinutes);
+    element.textContent = option.label;
+    elements.annoyInterval.append(element);
   });
 }
 
@@ -536,6 +556,8 @@ function resetEventForm(dateValue = state.selectedDate) {
     input.checked = false;
   });
   elements.notificationsEnabled.checked = false;
+  elements.annoyMode.checked = false;
+  elements.annoyInterval.value = "10";
   Array.from(elements.eventForm.querySelectorAll('input[name="notificationTargetUserIds"]')).forEach((input) => {
     input.checked = state.currentUser ? input.value === state.currentUser.id : false;
   });
@@ -580,6 +602,8 @@ function openEventModal(event = null) {
   elements.eventForm.elements.description.value = event.description || "";
   elements.eventForm.elements.allDay.checked = Boolean(event.allDay);
   elements.notificationsEnabled.checked = Boolean(event.notifications?.enabled);
+  elements.annoyMode.checked = Boolean(event.notifications?.annoyMode);
+  elements.annoyInterval.value = String(event.notifications?.annoyIntervalMinutes || 10);
 
   Array.from(elements.eventForm.querySelectorAll('input[name="memberIds"]')).forEach((input) => {
     input.checked = event.memberIds.includes(input.value);
@@ -631,6 +655,9 @@ function toggleNotificationFields() {
   Array.from(elements.eventForm.querySelectorAll('input[name="notificationTargetUserIds"], input[name="notificationOffsetsMinutes"]')).forEach((input) => {
     input.disabled = !enabled;
   });
+  elements.annoyMode.disabled = !enabled;
+  elements.annoyInterval.disabled = !enabled || !elements.annoyMode.checked;
+  elements.annoyIntervalWrap.hidden = !enabled || !elements.annoyMode.checked;
 }
 
 async function handleEventSubmit(event) {
@@ -652,7 +679,9 @@ async function handleEventSubmit(event) {
     memberIds: formData.getAll("memberIds"),
     notificationsEnabled: formData.get("notificationsEnabled") === "on",
     notificationTargetUserIds: formData.getAll("notificationTargetUserIds"),
-    notificationOffsetsMinutes: formData.getAll("notificationOffsetsMinutes")
+    notificationOffsetsMinutes: formData.getAll("notificationOffsetsMinutes"),
+    annoyMode: formData.get("annoyMode") === "on",
+    annoyIntervalMinutes: formData.get("annoyIntervalMinutes")
   };
 
   const body = {
@@ -665,7 +694,9 @@ async function handleEventSubmit(event) {
     notifications: {
       enabled: payload.notificationsEnabled,
       targetUserIds: payload.notificationTargetUserIds,
-      offsetsMinutes: payload.notificationOffsetsMinutes.map((value) => Number(value))
+      offsetsMinutes: payload.notificationOffsetsMinutes.map((value) => Number(value)),
+      annoyMode: payload.annoyMode,
+      annoyIntervalMinutes: Number(payload.annoyIntervalMinutes || 10)
     },
     start: combineDateAndTime(payload.date, payload.startTime || "00:00", allDay).toISOString(),
     end: combineDateAndTime(payload.endDate, payload.endTime || "23:59", allDay, true).toISOString()
@@ -760,6 +791,7 @@ function bindEvents() {
   elements.bulletinForm.addEventListener("submit", handleBulletinSubmit);
   elements.eventForm.elements.allDay.addEventListener("change", toggleTimeFields);
   elements.notificationsEnabled.addEventListener("change", toggleNotificationFields);
+  elements.annoyMode.addEventListener("change", toggleNotificationFields);
   elements.deleteEvent.addEventListener("click", async () => {
     try {
       await deleteCurrentEvent();

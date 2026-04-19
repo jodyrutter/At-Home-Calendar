@@ -1,12 +1,31 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: hearthboard-postgres
+    environment:
+      POSTGRES_DB: hearthboard
+      POSTGRES_USER: hearthboard
+      POSTGRES_PASSWORD: hearthboard
+    volumes:
+      - hearthboard-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hearthboard -d hearthboard"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+    restart: unless-stopped
   hearthboard:
     build:
       context: .
     container_name: hearthboard
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       HOST: 0.0.0.0
       PORT: 42069
       DATA_DIR: /app/data
+      DATABASE_URL: postgresql://hearthboard:hearthboard@postgres:5432/hearthboard
       APP_TIMEZONE: America/Port-au-Prince
       HOUSEHOLD_NAME: Hearthboard Household
       TRUST_PROXY_HEADERS: "true"
@@ -58,6 +77,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  hearthboard-postgres:
   hearthboard-data:
   caddy-data:
   caddy-config:

@@ -939,6 +939,57 @@ test("remote access protection redirects calendar to login but leaves gallery pu
   assert.equal(publicGallery.status, 200);
 });
 
+test("local network calendar bootstrap and event creation stay available without signing in", async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "hearthboard-"));
+  const port = 42135;
+  const server = spawn(process.execPath, ["server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: "127.0.0.1",
+      DATA_DIR: dataDir
+    },
+    stdio: "inherit"
+  });
+
+  t.after(() => {
+    server.kill();
+  });
+
+  await waitForServer(port);
+
+  const bootstrap = await fetch(`http://127.0.0.1:${port}/api/bootstrap`);
+  assert.equal(bootstrap.status, 200);
+  const bootstrapPayload = await bootstrap.json();
+  assert.equal(bootstrapPayload.currentUser, null);
+
+  const start = new Date(Date.now() + 60 * 60 * 1000);
+  const end = new Date(start.getTime() + 30 * 60 * 1000);
+  const createEvent = await fetch(`http://127.0.0.1:${port}/api/events`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      title: "LAN event",
+      category: "General",
+      location: "Kitchen",
+      description: "Shared LAN save still works.",
+      allDay: false,
+      memberIds: [],
+      notifications: {
+        enabled: false,
+        targetUserIds: [],
+        offsetsMinutes: []
+      },
+      start: start.toISOString(),
+      end: end.toISOString()
+    })
+  });
+  assert.equal(createEvent.status, 201);
+});
+
 test("remote users cannot self-register accounts", async (t) => {
   const dataDir = await mkdtemp(path.join(tmpdir(), "hearthboard-"));
   const port = 42124;
@@ -1285,6 +1336,118 @@ test("event reminder targets sync upcoming mobile reminders for the selected acc
   assert.ok(reminderPayload.reminders.every((reminder) => typeof reminder.scheduleAt === "string"));
 });
 
+test("annoy mode expands a single reminder into repeated upcoming nudges", async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "hearthboard-"));
+  const port = 42136;
+  const server = spawn(process.execPath, ["server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: "127.0.0.1",
+      DATA_DIR: dataDir
+    },
+    stdio: "inherit"
+  });
+
+  t.after(() => {
+    server.kill();
+  });
+
+  await waitForServer(port);
+
+  const register = await fetch(`http://127.0.0.1:${port}/api/session/register`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      username: "annoyed",
+      password: "household123"
+    })
+  });
+  assert.equal(register.status, 201);
+
+  const adminCookie = await setAdminPasswordAndLogin(`http://127.0.0.1:${port}`);
+  const account = await fetch(`http://127.0.0.1:${port}/api/account`, {
+    headers: {
+      Cookie: adminCookie
+    }
+  });
+  const accountPayload = await account.json();
+  const targetUser = accountPayload.users.find((user) => user.username === "annoyed");
+  assert.ok(targetUser);
+
+  const approve = await fetch(`http://127.0.0.1:${port}/api/admin/users/${targetUser.id}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: adminCookie
+    },
+    body: JSON.stringify({
+      approved: true,
+      permissionLevel: "family",
+      householdMember: true
+    })
+  });
+  assert.equal(approve.status, 200);
+
+  const start = new Date(Date.now() + 35 * 60 * 1000);
+  const end = new Date(start.getTime() + 60 * 60 * 1000);
+  const createEvent = await fetch(`http://127.0.0.1:${port}/api/events`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: adminCookie
+    },
+    body: JSON.stringify({
+      title: "Annoying event",
+      category: "General",
+      location: "",
+      description: "",
+      allDay: false,
+      memberIds: [],
+      notifications: {
+        enabled: true,
+        targetUserIds: [targetUser.id],
+        offsetsMinutes: [30],
+        annoyMode: true,
+        annoyIntervalMinutes: 10
+      },
+      start: start.toISOString(),
+      end: end.toISOString()
+    })
+  });
+  assert.equal(createEvent.status, 201);
+
+  const targetLogin = await fetch(`http://127.0.0.1:${port}/api/session/login`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      username: "annoyed",
+      password: "household123"
+    })
+  });
+  assert.equal(targetLogin.status, 200);
+  const targetCookie = cookieFromResponse(targetLogin, "hearthboard_session");
+
+  const reminderResponse = await fetch(`http://127.0.0.1:${port}/api/mobile/reminders`, {
+    headers: {
+      Cookie: targetCookie
+    }
+  });
+  assert.equal(reminderResponse.status, 200);
+  const reminderPayload = await reminderResponse.json();
+  assert.equal(reminderPayload.reminders.length, 4);
+  assert.deepEqual(
+    reminderPayload.reminders.map((reminder) => reminder.offsetMinutes),
+    [30, 20, 10, 0]
+  );
+  assert.ok(reminderPayload.reminders.every((reminder) => reminder.eventTitle === "Annoying event"));
+});
+
 test("remote gallery hides authenticated libraries until a user signs in", async (t) => {
   const dataDir = await mkdtemp(path.join(tmpdir(), "hearthboard-"));
   const publicMediaDir = await mkdtemp(path.join(tmpdir(), "hearthboard-public-media-"));
@@ -1436,7 +1599,9 @@ test("admin account shows tracked devices in the account panel payload", async (
   assert.equal(account.status, 200);
   const payload = await account.json();
   assert.ok(Array.isArray(payload.devices));
-  assert.ok(payload.devices.some((device) => device.ip === "203.0.113.10"));
+  assert.ok(payload.deviceSummary.totalKnownIps >= 1);
+  assert.ok(payload.devices.some((group) => group.ip === "203.0.113.10"));
+  assert.ok(payload.devices[0].identities.length >= 1);
 });
 
 test("embedded mobile login sets a cross-site session cookie", async (t) => {

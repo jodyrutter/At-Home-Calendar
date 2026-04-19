@@ -409,6 +409,19 @@ a.button {
 .device-group {
   display: grid;
   gap: 12px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--surface-muted);
+}
+
+.device-group summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.device-group summary::-webkit-details-marker {
+  display: none;
 }
 
 .device-group-header {
@@ -418,8 +431,6 @@ a.button {
   align-items: flex-start;
   padding: 16px;
   border-radius: 18px;
-  border: 1px solid var(--line);
-  background: var(--surface-muted);
 }
 
 .device-group-header h3 {
@@ -435,6 +446,7 @@ a.button {
 .user-list {
   display: grid;
   gap: 12px;
+  padding: 0 16px 16px;
 }
 
 .device-card {
@@ -1574,6 +1586,11 @@ fieldset {
 
 .notification-fieldset .meta-label {
   margin: 0 0 8px;
+}
+
+#event-annoy-interval-wrap {
+  display: grid;
+  gap: 8px;
 }
 
 html[data-mobile-app="true"] .page-shell {

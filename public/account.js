@@ -44,6 +44,7 @@ const elements = {
   userList: document.querySelector("#user-list"),
   visibilityError: document.querySelector("#visibility-error"),
   visibilitySuccess: document.querySelector("#visibility-success"),
+  deviceSummary: document.querySelector("#device-summary"),
   deviceList: document.querySelector("#device-list")
 };
 
@@ -157,6 +158,39 @@ function renderVisibilityGrid(target, items, prefix) {
   });
 }
 
+function renderDeviceSummary(summary) {
+  if (!elements.deviceSummary) {
+    return;
+  }
+
+  const payload = summary || {
+    totalKnownIps: 0,
+    totalIdentityClusters: 0,
+    totalAuthenticatedRequests: 0,
+    totalAnonymousRequests: 0,
+    likelyPeople: 0
+  };
+
+  elements.deviceSummary.innerHTML = `
+    <div class="summary-card">
+      <strong>${payload.totalKnownIps}</strong>
+      <span>Unique IPs</span>
+    </div>
+    <div class="summary-card">
+      <strong>${payload.totalIdentityClusters}</strong>
+      <span>Likely device clusters</span>
+    </div>
+    <div class="summary-card">
+      <strong>${payload.likelyPeople}</strong>
+      <span>Known signed-in people</span>
+    </div>
+    <div class="summary-card">
+      <strong>${payload.totalAnonymousRequests}</strong>
+      <span>Anonymous requests</span>
+    </div>
+  `;
+}
+
 function renderDeviceList(devices) {
   if (!elements.deviceList) {
     return;
@@ -171,62 +205,52 @@ function renderDeviceList(devices) {
     return;
   }
 
-  const groups = new Map();
-  devices.forEach((device) => {
-    const key = device.ip || "Unknown IP";
-    const group = groups.get(key) || [];
-    group.push(device);
-    groups.set(key, group);
-  });
+  devices.forEach((group, index) => {
+    const wrapper = document.createElement("details");
+    wrapper.className = "device-group";
+    if (index < 3 || group.anonymousRequests > 0) {
+      wrapper.open = true;
+    }
 
-  [...groups.entries()]
-    .sort((left, right) => {
-      const leftTime = Math.max(...left[1].map((device) => new Date(device.lastSeenAt || 0).getTime()));
-      const rightTime = Math.max(...right[1].map((device) => new Date(device.lastSeenAt || 0).getTime()));
-      return rightTime - leftTime;
-    })
-    .forEach(([ip, groupedDevices]) => {
-      const wrapper = document.createElement("section");
-      wrapper.className = "device-group";
-      const anonymousHits = groupedDevices.reduce((total, device) => total + (device.anonymousVisitCount || 0), 0);
-      const authenticatedHits = groupedDevices.reduce((total, device) => total + (device.authenticatedVisitCount || 0), 0);
-      const knownUsers = [...new Set(groupedDevices.flatMap((device) => device.usernames || []))];
+    const summary = document.createElement("summary");
+    summary.className = `device-group-header ${group.anonymousRequests > 0 ? "has-anonymous" : ""}`;
+    summary.innerHTML = `
+      <div>
+        <h3>${group.ip}</h3>
+        <p class="device-card-meta">${group.identityCount} likely device cluster${group.identityCount === 1 ? "" : "s"} | ${group.authenticatedRequests} authenticated request${group.authenticatedRequests === 1 ? "" : "s"} | ${group.anonymousRequests} anonymous request${group.anonymousRequests === 1 ? "" : "s"}</p>
+        <p class="device-card-meta">${group.usernames?.length ? `People seen here: ${group.usernames.join(", ")}` : "No signed-in people seen from this IP yet"}</p>
+      </div>
+      <span class="device-group-badge ${group.anonymousRequests > 0 ? "is-warn" : ""}">${group.anonymousRequests > 0 ? "Anonymous activity seen" : "Known activity only"}</span>
+    `;
+    wrapper.append(summary);
 
-      wrapper.innerHTML = `
-        <div class="device-group-header ${anonymousHits > 0 ? "has-anonymous" : ""}">
-          <div>
-            <h3>${ip}</h3>
-            <p class="device-card-meta">${groupedDevices.length} device${groupedDevices.length === 1 ? "" : "s"} | ${authenticatedHits} authenticated hit${authenticatedHits === 1 ? "" : "s"} | ${anonymousHits} anonymous hit${anonymousHits === 1 ? "" : "s"}</p>
-            <p class="device-card-meta">${knownUsers.length ? `Users seen here: ${knownUsers.join(", ")}` : "No signed-in users seen from this IP yet"}</p>
-          </div>
-          <span class="device-group-badge ${anonymousHits > 0 ? "is-warn" : ""}">${anonymousHits > 0 ? "Anonymous activity seen" : "Known activity only"}</span>
+    const detailMeta = document.createElement("p");
+    detailMeta.className = "device-card-meta";
+    detailMeta.textContent = `First seen ${formatTimestamp(group.firstSeenAt)} | Last seen ${formatTimestamp(group.lastSeenAt)}${group.hostnames?.length ? ` | Hosts: ${group.hostnames.join(", ")}` : ""}`;
+    wrapper.append(detailMeta);
+
+    const list = document.createElement("div");
+    list.className = "device-group-list";
+
+    (group.identities || []).forEach((identity) => {
+      const card = document.createElement("article");
+      card.className = `device-card${identity.anonymousRequests > 0 ? " has-anonymous" : ""}`;
+      card.innerHTML = `
+        <div class="device-card-topline">
+          <h3>${identity.label || "Unknown device"}</h3>
+          <span class="device-card-ip">${identity.host || "Unknown host"}</span>
         </div>
+        <p class="device-card-meta">${identity.distinctDeviceCount} stored device id${identity.distinctDeviceCount === 1 ? "" : "s"} | ${identity.requestCount} request${identity.requestCount === 1 ? "" : "s"}</p>
+        <p class="device-card-meta">${identity.usernames?.length ? `Signed in as ${identity.usernames.join(", ")}` : "Never authenticated"}</p>
+        <p class="device-card-meta">First seen ${formatTimestamp(identity.firstSeenAt)} | Last seen ${formatTimestamp(identity.lastSeenAt)}</p>
+        <p class="device-card-agent">${identity.userAgent || "Unknown user agent"}</p>
       `;
-
-      const list = document.createElement("div");
-      list.className = "device-group-list";
-
-      groupedDevices
-        .sort((left, right) => new Date(right.lastSeenAt || 0).getTime() - new Date(left.lastSeenAt || 0).getTime())
-        .forEach((device) => {
-          const card = document.createElement("article");
-          card.className = `device-card${(device.anonymousVisitCount || 0) > 0 ? " has-anonymous" : ""}`;
-          card.innerHTML = `
-            <div class="device-card-topline">
-              <h3>${device.label || "Unknown device"}</h3>
-              <span class="device-card-ip">${device.host || "Unknown host"}</span>
-            </div>
-            <p class="device-card-meta">First seen ${formatTimestamp(device.firstSeenAt)} | Last seen ${formatTimestamp(device.lastSeenAt)}</p>
-            <p class="device-card-meta">${device.visitCount || 0} request${device.visitCount === 1 ? "" : "s"} | ${device.authenticatedVisitCount || 0} authenticated | ${device.anonymousVisitCount || 0} anonymous</p>
-            <p class="device-card-meta">${device.usernames?.length ? `Signed in as ${device.usernames.join(", ")}` : "Never authenticated"}</p>
-            <p class="device-card-agent">${device.userAgent || "Unknown user agent"}</p>
-          `;
-          list.append(card);
-        });
-
-      wrapper.append(list);
-      elements.deviceList.append(wrapper);
+      list.append(card);
     });
+
+    wrapper.append(list);
+    elements.deviceList.append(wrapper);
+  });
 }
 
 function permissionSelect(value) {
@@ -384,6 +408,7 @@ function render() {
     renderVisibilityGrid(elements.pageGrid, pages, "page");
     renderVisibilityGrid(elements.libraryGrid, libraries, "library");
     renderUserList(users);
+    renderDeviceSummary(state.account.deviceSummary);
     renderDeviceList(devices);
     renderAdminTabs();
   }
