@@ -37,7 +37,7 @@
         </div>
       </nav>
 
-      <header class="hero">
+      <header class="hero hero-calendar">
         <div class="hero-copy">
           <p class="eyebrow">Self-hosted household rhythm</p>
           <h1>Hearthboard</h1>
@@ -57,35 +57,180 @@
           <h2 id="household-name">Loading household...</h2>
           <p id="household-timezone" class="muted"></p>
           <div id="summary-cards" class="summary-cards"></div>
+          <div class="hero-signal-grid" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
         </div>
       </header>
 
-      <main class="layout">
-        <section class="calendar-panel card">
-          <div class="panel-header">
-            <div class="panel-heading">
-              <span class="panel-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" role="presentation" focusable="false">
-                  <path d="M7 2a1 1 0 0 1 1 1v1h8V3a1 1 0 1 1 2 0v1h1a3 3 0 0 1 3 3v11a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V7a3 3 0 0 1 3-3h1V3a1 1 0 0 1 1-1Zm13 8H4v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8ZM5 6a1 1 0 0 0-1 1v1h16V7a1 1 0 0 0-1-1H5Zm2 6h3v3H7v-3Zm5 0h3v3h-3v-3Zm5 0h3v3h-3v-3Z"></path>
-                </svg>
-              </span>
-              <div class="panel-heading-text">
-                <p class="meta-label">Month view</p>
-                <h2 id="month-label">Loading...</h2>
+      <main class="layout schedule-layout">
+        <section class="calendar-stage">
+          <section class="calendar-panel card">
+            <div class="panel-header">
+              <div class="panel-heading">
+                <span class="panel-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" role="presentation" focusable="false">
+                    <path d="M7 2a1 1 0 0 1 1 1v1h8V3a1 1 0 1 1 2 0v1h1a3 3 0 0 1 3 3v11a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V7a3 3 0 0 1 3-3h1V3a1 1 0 0 1 1-1Zm13 8H4v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8ZM5 6a1 1 0 0 0-1 1v1h16V7a1 1 0 0 0-1-1H5Zm2 6h3v3H7v-3Zm5 0h3v3h-3v-3Zm5 0h3v3h-3v-3Z"></path>
+                  </svg>
+                </span>
+                <div class="panel-heading-text">
+                  <p class="meta-label">Month view</p>
+                  <h2 id="month-label">Loading...</h2>
+                </div>
+              </div>
+              <div class="month-actions">
+                <button id="prev-month" class="icon-button" type="button" aria-label="Previous month">&larr;</button>
+                <button id="next-month" class="icon-button" type="button" aria-label="Next month">&rarr;</button>
               </div>
             </div>
-            <div class="month-actions">
-              <button id="prev-month" class="icon-button" type="button" aria-label="Previous month">&larr;</button>
-              <button id="next-month" class="icon-button" type="button" aria-label="Next month">&rarr;</button>
-            </div>
-          </div>
 
-          <div id="member-filters" class="member-filters"></div>
-          <div class="weekday-row" id="weekday-row"></div>
-          <div id="calendar-grid" class="calendar-grid"></div>
+            <div class="calendar-ribbon">
+              <p class="calendar-ribbon-copy">Tap a day to focus it. Use the studio on the right to drop in events fast, then edit details whenever you need more control.</p>
+              <div id="member-filters" class="member-filters"></div>
+            </div>
+            <div class="weekday-row" id="weekday-row"></div>
+            <div id="calendar-grid" class="calendar-grid"></div>
+          </section>
+
+          <section class="card pulse-panel">
+            <div class="panel-header tight">
+              <div>
+                <p class="meta-label">Selected day</p>
+                <h2 id="selected-day-label">Today</h2>
+              </div>
+            </div>
+            <div class="pulse-grid">
+              <div class="pulse-stack">
+                <p class="pulse-intro muted">Daily pulse</p>
+                <div id="selected-day-events" class="stack"></div>
+              </div>
+              <div class="pulse-stack">
+                <p class="pulse-intro muted">Coming up soon</p>
+                <div id="upcoming-events" class="stack"></div>
+              </div>
+            </div>
+          </section>
         </section>
 
-        <aside class="sidebar">
+        <aside class="sidebar rhythm-rail">
+          <section id="event-studio-card" class="card event-studio-card">
+            <div class="panel-header tight">
+              <div>
+                <p id="event-studio-kicker" class="meta-label">Event studio</p>
+                <h2 id="event-modal-title">Add event</h2>
+              </div>
+              <span id="event-studio-state" class="studio-state-pill">Ready</span>
+            </div>
+
+            <p class="event-studio-copy muted">
+              Build the next moment on the board here. Pick a day, shape the reminder behavior, and save it straight into the household flow.
+            </p>
+
+            <form id="event-form" class="modal-form event-studio-form">
+              <div class="event-studio-grid">
+                <label>
+                  Title
+                  <input name="title" type="text" maxlength="120" required />
+                </label>
+
+                <div class="split-fields">
+                  <label>
+                    Date
+                    <input name="date" type="date" required />
+                  </label>
+                  <label>
+                    End date
+                    <input name="endDate" type="date" required />
+                  </label>
+                </div>
+
+                <label class="checkbox-field">
+                  <input name="allDay" type="checkbox" />
+                  All-day event
+                </label>
+
+                <div class="split-fields">
+                  <label>
+                    Start time
+                    <input name="startTime" type="time" required />
+                  </label>
+                  <label>
+                    End time
+                    <input name="endTime" type="time" required />
+                  </label>
+                </div>
+
+                <div class="split-fields">
+                  <label>
+                    Category
+                    <select name="category">
+                      <option>General</option>
+                      <option>Meals</option>
+                      <option>School</option>
+                      <option>Work</option>
+                      <option>Chores</option>
+                      <option>Health</option>
+                      <option>Travel</option>
+                      <option>Social</option>
+                    </select>
+                  </label>
+                  <label>
+                    Location
+                    <input name="location" type="text" maxlength="120" />
+                  </label>
+                </div>
+
+                <label>
+                  Notes
+                  <textarea name="description" rows="4" maxlength="600"></textarea>
+                </label>
+
+                <fieldset>
+                  <legend>Assign household members</legend>
+                  <div id="member-checkboxes" class="checkbox-grid"></div>
+                </fieldset>
+
+                <fieldset class="notification-fieldset">
+                  <legend>Phone reminders</legend>
+                  <label class="checkbox-field">
+                    <input id="event-notifications-enabled" name="notificationsEnabled" type="checkbox" />
+                    Send push-style phone reminders for this event
+                  </label>
+                  <div id="event-notification-config" class="stack" hidden>
+                    <div>
+                      <p class="meta-label">Who gets bugged</p>
+                      <div id="notification-target-checkboxes" class="checkbox-grid"></div>
+                    </div>
+                    <div>
+                      <p class="meta-label">When to remind them</p>
+                      <div id="notification-offset-checkboxes" class="checkbox-grid"></div>
+                    </div>
+                    <label class="checkbox-field">
+                      <input id="event-annoy-mode" name="annoyMode" type="checkbox" />
+                      Keep bugging them until the event starts
+                    </label>
+                    <label id="event-annoy-interval-wrap" hidden>
+                      Annoy cadence
+                      <select id="event-annoy-interval" name="annoyIntervalMinutes"></select>
+                    </label>
+                    <p class="muted">These reminders sync to the Android app and get scheduled on the phone for the selected accounts.</p>
+                  </div>
+                </fieldset>
+              </div>
+
+              <p id="event-form-error" class="form-error" hidden></p>
+              <p id="event-form-success" class="form-success" hidden></p>
+
+              <div class="modal-actions">
+                <button id="delete-event" class="button button-danger" type="button" hidden>Delete</button>
+                <button id="reset-event-form" class="button button-secondary" type="button">Reset</button>
+                <button id="save-event-button" class="button button-primary" type="submit">Save event</button>
+              </div>
+            </form>
+          </section>
+
           <section class="card">
             <div class="panel-header tight">
               <div>
@@ -97,26 +242,6 @@
             <div id="bulletin-list" class="stack"></div>
           </section>
 
-          <section class="card day-panel">
-            <div class="panel-header tight">
-              <div>
-                <p class="meta-label">Selected day</p>
-                <h2 id="selected-day-label">Today</h2>
-              </div>
-            </div>
-            <div id="selected-day-events" class="stack"></div>
-          </section>
-
-          <section class="card">
-            <div class="panel-header tight">
-              <div>
-                <p class="meta-label">Upcoming</p>
-                <h2>What is next</h2>
-              </div>
-            </div>
-            <div id="upcoming-events" class="stack"></div>
-          </section>
-
           <section class="card">
             <div class="panel-header tight">
               <div>
@@ -124,121 +249,12 @@
                 <h2>Who is on the board</h2>
               </div>
             </div>
-            <p class="muted">Accounts join the household roster automatically.</p>
+            <p class="muted">Family accounts and anyone you explicitly place on the household board appear here.</p>
             <div id="member-list" class="stack"></div>
           </section>
         </aside>
       </main>
     </div>
-
-    <dialog id="event-modal" class="modal">
-      <form id="event-form" class="modal-form">
-        <div class="modal-header">
-          <div>
-            <p class="meta-label">Schedule editor</p>
-            <h2 id="event-modal-title">Add event</h2>
-          </div>
-          <button id="close-event-modal" class="icon-button" type="button" aria-label="Close">&times;</button>
-        </div>
-
-        <label>
-          Title
-          <input name="title" type="text" maxlength="120" required />
-        </label>
-
-        <div class="split-fields">
-          <label>
-            Date
-            <input name="date" type="date" required />
-          </label>
-          <label>
-            End date
-            <input name="endDate" type="date" required />
-          </label>
-        </div>
-
-        <label class="checkbox-field">
-          <input name="allDay" type="checkbox" />
-          All-day event
-        </label>
-
-        <div class="split-fields">
-          <label>
-            Start time
-            <input name="startTime" type="time" required />
-          </label>
-          <label>
-            End time
-            <input name="endTime" type="time" required />
-          </label>
-        </div>
-
-        <div class="split-fields">
-          <label>
-            Category
-            <select name="category">
-              <option>General</option>
-              <option>Meals</option>
-              <option>School</option>
-              <option>Work</option>
-              <option>Chores</option>
-              <option>Health</option>
-              <option>Travel</option>
-              <option>Social</option>
-            </select>
-          </label>
-          <label>
-            Location
-            <input name="location" type="text" maxlength="120" />
-          </label>
-        </div>
-
-        <label>
-          Notes
-          <textarea name="description" rows="4" maxlength="600"></textarea>
-        </label>
-
-        <fieldset>
-          <legend>Assign household members</legend>
-          <div id="member-checkboxes" class="checkbox-grid"></div>
-        </fieldset>
-
-        <fieldset class="notification-fieldset">
-          <legend>Phone reminders</legend>
-          <label class="checkbox-field">
-            <input id="event-notifications-enabled" name="notificationsEnabled" type="checkbox" />
-            Send push-style phone reminders for this event
-          </label>
-          <div id="event-notification-config" class="stack" hidden>
-            <div>
-              <p class="meta-label">Who gets bugged</p>
-              <div id="notification-target-checkboxes" class="checkbox-grid"></div>
-            </div>
-            <div>
-              <p class="meta-label">When to remind them</p>
-              <div id="notification-offset-checkboxes" class="checkbox-grid"></div>
-            </div>
-            <label class="checkbox-field">
-              <input id="event-annoy-mode" name="annoyMode" type="checkbox" />
-              Keep bugging them until the event starts
-            </label>
-            <label id="event-annoy-interval-wrap" hidden>
-              Annoy cadence
-              <select id="event-annoy-interval" name="annoyIntervalMinutes"></select>
-            </label>
-            <p class="muted">These reminders sync to the Android app and get scheduled on the phone for the selected accounts.</p>
-          </div>
-        </fieldset>
-
-        <p id="event-form-error" class="form-error" hidden></p>
-
-        <div class="modal-actions">
-          <button id="delete-event" class="button button-danger" type="button" hidden>Delete</button>
-          <button class="button button-secondary" type="button" data-close-dialog="event-modal">Cancel</button>
-          <button class="button button-primary" type="submit">Save event</button>
-        </div>
-      </form>
-    </dialog>
 
     <dialog id="bulletin-modal" class="modal">
       <form id="bulletin-form" class="modal-form">

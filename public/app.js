@@ -31,13 +31,17 @@ const elements = {
   bulletinList: document.querySelector("#bulletin-list"),
   memberFilters: document.querySelector("#member-filters"),
   memberList: document.querySelector("#member-list"),
-  eventModal: document.querySelector("#event-modal"),
   bulletinModal: document.querySelector("#bulletin-modal"),
   eventForm: document.querySelector("#event-form"),
   bulletinForm: document.querySelector("#bulletin-form"),
   eventModalTitle: document.querySelector("#event-modal-title"),
+  eventStudioKicker: document.querySelector("#event-studio-kicker"),
+  eventStudioState: document.querySelector("#event-studio-state"),
+  eventStudioCard: document.querySelector("#event-studio-card"),
   bulletinModalTitle: document.querySelector("#bulletin-modal-title"),
   deleteEvent: document.querySelector("#delete-event"),
+  resetEventFormButton: document.querySelector("#reset-event-form"),
+  saveEventButton: document.querySelector("#save-event-button"),
   deleteBulletin: document.querySelector("#delete-bulletin"),
   memberCheckboxes: document.querySelector("#member-checkboxes"),
   notificationsEnabled: document.querySelector("#event-notifications-enabled"),
@@ -48,6 +52,7 @@ const elements = {
   annoyIntervalWrap: document.querySelector("#event-annoy-interval-wrap"),
   annoyInterval: document.querySelector("#event-annoy-interval"),
   eventFormError: document.querySelector("#event-form-error"),
+  eventFormSuccess: document.querySelector("#event-form-success"),
   bulletinFormError: document.querySelector("#bulletin-form-error"),
   emptyStateTemplate: document.querySelector("#empty-state-template")
 };
@@ -241,6 +246,10 @@ async function loadBoard() {
   }
 
   render();
+  if (!elements.eventForm.dataset.initialized) {
+    resetEventForm(state.selectedDate);
+    elements.eventForm.dataset.initialized = "true";
+  }
   window.dispatchEvent(new Event("hearthboard:mobile-sync"));
 }
 
@@ -536,12 +545,43 @@ function emptyStateNode() {
   return elements.emptyStateTemplate.content.firstElementChild.cloneNode(true);
 }
 
+function showEventStudio() {
+  if (!elements.eventStudioCard) {
+    return;
+  }
+
+  elements.eventStudioCard.scrollIntoView({ behavior: "smooth", block: "start" });
+  elements.eventForm.elements.title.focus({ preventScroll: true });
+}
+
+function setEventStudioMode(mode = "create") {
+  const editing = mode === "edit";
+  elements.eventStudioKicker.textContent = editing ? "Editing on the board" : "Event studio";
+  elements.eventStudioState.textContent = editing ? "Editing" : "Ready";
+  elements.eventStudioState.dataset.mode = mode;
+  elements.eventModalTitle.textContent = editing ? "Edit event" : "Add event";
+  elements.saveEventButton.textContent = editing ? "Update event" : "Save event";
+  elements.deleteEvent.hidden = !editing;
+}
+
+function clearEventMessages() {
+  elements.eventFormError.hidden = true;
+  elements.eventFormSuccess.hidden = true;
+}
+
+function setEventSubmitState(isSaving) {
+  elements.saveEventButton.disabled = isSaving;
+  elements.saveEventButton.textContent = isSaving
+    ? (state.editingEventId ? "Updating..." : "Saving...")
+    : (state.editingEventId ? "Update event" : "Save event");
+}
+
 function resetEventForm(dateValue = state.selectedDate) {
   state.editingEventId = null;
-  elements.eventModalTitle.textContent = "Add event";
-  elements.deleteEvent.hidden = true;
-  elements.eventFormError.hidden = true;
+  clearEventMessages();
+  setEventSubmitState(false);
   elements.eventForm.reset();
+  setEventStudioMode("create");
 
   const date = parseDateKey(dateValue);
   const start = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 18, 0, 0, 0);
@@ -580,14 +620,13 @@ function resetBulletinForm() {
 function openEventModal(event = null) {
   if (!event) {
     resetEventForm();
-    elements.eventModal.showModal();
+    showEventStudio();
     return;
   }
 
   state.editingEventId = event.id;
-  elements.eventModalTitle.textContent = "Edit event";
-  elements.deleteEvent.hidden = false;
-  elements.eventFormError.hidden = true;
+  clearEventMessages();
+  setEventStudioMode("edit");
 
   const start = new Date(event.start);
   const end = new Date(event.end);
@@ -617,7 +656,7 @@ function openEventModal(event = null) {
 
   toggleTimeFields();
   toggleNotificationFields();
-  elements.eventModal.showModal();
+  showEventStudio();
 }
 
 function openBulletinModal(bulletin = null) {
@@ -662,7 +701,7 @@ function toggleNotificationFields() {
 
 async function handleEventSubmit(event) {
   event.preventDefault();
-  elements.eventFormError.hidden = true;
+  clearEventMessages();
 
   const formData = new FormData(elements.eventForm);
   const allDay = formData.get("allDay") === "on";
@@ -684,6 +723,51 @@ async function handleEventSubmit(event) {
     annoyIntervalMinutes: formData.get("annoyIntervalMinutes")
   };
 
+  if (!payload.title) {
+    elements.eventFormError.textContent = "Event title is required.";
+    elements.eventFormError.hidden = false;
+    return;
+  }
+
+  if (!payload.date || !payload.endDate) {
+    elements.eventFormError.textContent = "Choose a start date and an end date.";
+    elements.eventFormError.hidden = false;
+    return;
+  }
+
+  if (!allDay && (!payload.startTime || !payload.endTime)) {
+    elements.eventFormError.textContent = "Choose a start and end time.";
+    elements.eventFormError.hidden = false;
+    return;
+  }
+
+  if (payload.notificationsEnabled && payload.notificationTargetUserIds.length === 0) {
+    elements.eventFormError.textContent = "Choose at least one account to notify.";
+    elements.eventFormError.hidden = false;
+    return;
+  }
+
+  if (payload.notificationsEnabled && payload.notificationOffsetsMinutes.length === 0) {
+    elements.eventFormError.textContent = "Choose at least one reminder time.";
+    elements.eventFormError.hidden = false;
+    return;
+  }
+
+  const startDate = combineDateAndTime(payload.date, payload.startTime || "00:00", allDay);
+  const endDate = combineDateAndTime(payload.endDate, payload.endTime || "23:59", allDay, true);
+
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+    elements.eventFormError.textContent = "Start and end times must be valid.";
+    elements.eventFormError.hidden = false;
+    return;
+  }
+
+  if (endDate.getTime() < startDate.getTime()) {
+    elements.eventFormError.textContent = "Event end time must be after the start time.";
+    elements.eventFormError.hidden = false;
+    return;
+  }
+
   const body = {
     title: payload.title,
     category: payload.category,
@@ -698,21 +782,29 @@ async function handleEventSubmit(event) {
       annoyMode: payload.annoyMode,
       annoyIntervalMinutes: Number(payload.annoyIntervalMinutes || 10)
     },
-    start: combineDateAndTime(payload.date, payload.startTime || "00:00", allDay).toISOString(),
-    end: combineDateAndTime(payload.endDate, payload.endTime || "23:59", allDay, true).toISOString()
+    start: startDate.toISOString(),
+    end: endDate.toISOString()
   };
 
   try {
+    const wasEditing = Boolean(state.editingEventId);
+    setEventSubmitState(true);
     if (state.editingEventId) {
       await api(`/api/events/${state.editingEventId}`, { method: "PATCH", body: JSON.stringify(body) });
     } else {
       await api("/api/events", { method: "POST", body: JSON.stringify(body) });
     }
+    state.selectedDate = toDateKey(startDate);
+    state.visibleMonth = startOfMonth(startDate);
     await loadBoard();
-    closeModal(elements.eventModal);
+    resetEventForm(toDateKey(startDate));
+    elements.eventFormSuccess.textContent = wasEditing ? "Event updated." : "Event added to the board.";
+    elements.eventFormSuccess.hidden = false;
   } catch (error) {
     elements.eventFormError.textContent = error.message;
     elements.eventFormError.hidden = false;
+  } finally {
+    setEventSubmitState(false);
   }
 }
 
@@ -750,7 +842,9 @@ async function deleteCurrentEvent() {
 
   await api(`/api/events/${state.editingEventId}`, { method: "DELETE" });
   await loadBoard();
-  closeModal(elements.eventModal);
+  resetEventForm();
+  elements.eventFormSuccess.textContent = "Event removed from the board.";
+  elements.eventFormSuccess.hidden = false;
 }
 
 async function deleteCurrentBulletin() {
@@ -779,7 +873,6 @@ function bindEvents() {
     state.visibleMonth = new Date(state.visibleMonth.getFullYear(), state.visibleMonth.getMonth() + 1, 1);
     render();
   });
-  document.querySelector("#close-event-modal").addEventListener("click", () => closeModal(elements.eventModal));
   document.querySelector("#close-bulletin-modal").addEventListener("click", () => closeModal(elements.bulletinModal));
   document.querySelectorAll("[data-close-dialog]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -789,6 +882,7 @@ function bindEvents() {
 
   elements.eventForm.addEventListener("submit", handleEventSubmit);
   elements.bulletinForm.addEventListener("submit", handleBulletinSubmit);
+  elements.resetEventFormButton.addEventListener("click", () => resetEventForm());
   elements.eventForm.elements.allDay.addEventListener("change", toggleTimeFields);
   elements.notificationsEnabled.addEventListener("change", toggleNotificationFields);
   elements.annoyMode.addEventListener("change", toggleNotificationFields);
