@@ -12,9 +12,12 @@
 
 	header {
 		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
 		Referrer-Policy no-referrer
-		Permissions-Policy "camera=(), microphone=(), geolocation=()"
-		Content-Security-Policy "frame-ancestors 'self' http://localhost https://localhost capacitor://localhost"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), interest-cohort=()"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		Content-Security-Policy "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; font-src 'self' data:; frame-ancestors 'self' http://localhost https://localhost capacitor://localhost; base-uri 'self'; form-action 'self'; object-src 'none'"
+		-Server
 	}
 
 	reverse_proxy hearthboard:42069

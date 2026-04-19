@@ -181,8 +181,27 @@ function defaultPageVisibility() {
 
 function defaultLibraryVisibilityEntry(library) {
   const authMode = String(library?.authMode || "").trim().toLowerCase();
+  // Libraries marked authMode="always" (e.g. the phone library) hold private
+  // material that should never be browsable by other approved family members.
+  // Lock them to the admin role on both the LAN and remote audience scopes.
   if (authMode === "always") {
-    return { lan: "family", remote: "family" };
+    return { lan: "admin", remote: "admin" };
+  }
+
+  if (authMode === "remote" || library?.remoteProtected) {
+    return { lan: "public", remote: "trusted" };
+  }
+
+  return { lan: "public", remote: "public" };
+}
+
+// Hard floors that no admin override can lower. Anything that requires an
+// "always" auth mode should never be reachable below the admin tier even if a
+// stale visibility row was persisted before this rule existed.
+function libraryVisibilityFloor(library) {
+  const authMode = String(library?.authMode || "").trim().toLowerCase();
+  if (authMode === "always") {
+    return { lan: "admin", remote: "admin" };
   }
 
   if (authMode === "remote" || library?.remoteProtected) {
@@ -327,9 +346,16 @@ if (!db.data.security.libraryVisibility || typeof db.data.security.libraryVisibi
 }
 
 for (const library of mediaLibraries) {
-  db.data.security.libraryVisibility[library.id] = normalizeVisibilityRule(
+  const stored = normalizeVisibilityRule(
     db.data.security.libraryVisibility[library.id],
     defaultLibraryVisibilityEntry(library)
+  );
+  // Migrate any historical visibility rows up to the floor that the library's
+  // authMode now enforces. This is what closes the door on phone photos that
+  // had been silently set to "family" by an earlier version of the seed.
+  db.data.security.libraryVisibility[library.id] = clampVisibilityRule(
+    stored,
+    libraryVisibilityFloor(library)
   );
 }
 
@@ -1928,10 +1954,15 @@ function libraryVisibility(library) {
     return { lan: "public", remote: "public" };
   }
 
-  return normalizeVisibilityRule(
+  const stored = normalizeVisibilityRule(
     db.data.security.libraryVisibility?.[library.id],
     defaultLibraryVisibilityEntry(library)
   );
+
+  // Enforce the hard floor derived from the library's declared authMode so
+  // e.g. phone photos can never fall below admin even if a previously saved
+  // admin override was looser than the floor we now require.
+  return clampVisibilityRule(stored, libraryVisibilityFloor(library));
 }
 
 function requestCanAccessPage(request, pageKey) {
@@ -3567,7 +3598,27 @@ app.use(async (request, response, next) => {
   return response.redirect(loginRedirectUrl(request, nextPath));
 });
 
-app.use(express.static(path.join(__dirname, "public")));
+app.use(
+  express.static(path.join(__dirname, "public"), {
+    etag: true,
+    lastModified: true,
+    maxAge: "1h",
+    setHeaders(response, filePath) {
+      const ext = path.extname(filePath).toLowerCase();
+      // Image / font / favicon assets can sit in the browser cache for a day.
+      if ([".svg", ".png", ".jpg", ".jpeg", ".webp", ".ico", ".woff", ".woff2"].includes(ext)) {
+        response.setHeader("Cache-Control", "public, max-age=86400, must-revalidate");
+      } else if ([".css", ".js", ".mjs"].includes(ext)) {
+        response.setHeader("Cache-Control", "public, max-age=3600, must-revalidate");
+      } else if (ext === ".html") {
+        // HTML shells must always revalidate so we never strand a stale shell
+        // in front of a fresh JS bundle.
+        response.setHeader("Cache-Control", "no-cache");
+      }
+      response.setHeader("X-Content-Type-Options", "nosniff");
+    }
+  })
+);
 
 app.get("/api/health", (_request, response) => {
   response.setHeader("Access-Control-Allow-Origin", "*");
@@ -3858,9 +3909,16 @@ app.patch("/api/admin/visibility", async (request, response) => {
 
   if (nextLibraries && typeof nextLibraries === "object") {
     for (const library of mediaLibraries) {
-      db.data.security.libraryVisibility[library.id] = normalizeVisibilityRule(
+      const requested = normalizeVisibilityRule(
         nextLibraries[library.id],
         libraryVisibility(library)
+      );
+      // Re-apply the per-library floor on every admin write so an admin can
+      // never accidentally relax a private library (e.g. phone photos) below
+      // the role its authMode declares.
+      db.data.security.libraryVisibility[library.id] = clampVisibilityRule(
+        requested,
+        libraryVisibilityFloor(library)
       );
     }
   }
@@ -4705,16 +4763,24 @@ app.get(/^\/media-video\/([^/]+)\/([^/]+)(?:\/(.*))?$/, async (request, response
   return response.sendFile(cachePath);
 });
 
+function sendHtmlShell(response, filename) {
+  response.setHeader("Cache-Control", "no-cache");
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.setHeader("X-Frame-Options", "SAMEORIGIN");
+  response.setHeader("Referrer-Policy", "no-referrer");
+  return response.sendFile(path.join(__dirname, "public", filename));
+}
+
 app.get("/gallery", (_request, response) => {
-  response.sendFile(path.join(__dirname, "public", "gallery.html"));
+  sendHtmlShell(response, "gallery.html");
 });
 
 app.get("/calendar/studio", (_request, response) => {
-  response.sendFile(path.join(__dirname, "public", "event-studio.html"));
+  sendHtmlShell(response, "event-studio.html");
 });
 
 app.get("/login", (_request, response) => {
-  response.sendFile(path.join(__dirname, "public", "login.html"));
+  sendHtmlShell(response, "login.html");
 });
 
 app.get("/access", (request, response) => {
@@ -4723,15 +4789,15 @@ app.get("/access", (request, response) => {
 });
 
 app.get("/assistant", (_request, response) => {
-  response.sendFile(path.join(__dirname, "public", "assistant.html"));
+  sendHtmlShell(response, "assistant.html");
 });
 
 app.get("/account", (_request, response) => {
-  response.sendFile(path.join(__dirname, "public", "account.html"));
+  sendHtmlShell(response, "account.html");
 });
 
 app.get("/notifications", (_request, response) => {
-  response.sendFile(path.join(__dirname, "public", "notifications.html"));
+  sendHtmlShell(response, "notifications.html");
 });
 
 app.use((request, response, next) => {
@@ -4739,7 +4805,7 @@ app.use((request, response, next) => {
     return next();
   }
 
-  return response.sendFile(path.join(__dirname, "public", "index.html"));
+  return sendHtmlShell(response, "index.html");
 });
 
 app.listen(PORT, HOST, () => {

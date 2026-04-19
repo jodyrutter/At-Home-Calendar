@@ -28,6 +28,7 @@ const elements = {
   annoyMode: document.querySelector("#event-annoy-mode"),
   annoyLevelWrap: document.querySelector("#event-annoy-level-wrap"),
   annoyLevel: document.querySelector("#event-annoy-level"),
+  annoyLevelMeter: document.querySelector("#event-annoy-level-meter"),
   aiReminderCopy: document.querySelector("#event-ai-reminders"),
   aiUseWeb: document.querySelector("#event-ai-use-web"),
   aiUseWebWrap: document.querySelector("#event-ai-use-web-wrap"),
@@ -165,13 +166,33 @@ function toggleNotificationFields() {
     input.disabled = !enabled;
   });
   elements.annoyMode.disabled = !enabled;
-  elements.annoyLevel.disabled = !enabled || !elements.annoyMode.checked;
-  elements.annoyLevelWrap.hidden = !enabled || !elements.annoyMode.checked;
+  // Annoyance level stays editable any time notifications are on. Previously
+  // this field was disabled whenever annoy-mode was unchecked, which meant the
+  // browser skipped it at submit time and the server fell back to 5 forever.
+  elements.annoyLevel.disabled = !enabled;
+  elements.annoyLevelWrap.hidden = !enabled;
+  if (elements.annoyLevelWrap.dataset) {
+    elements.annoyLevelWrap.dataset.annoyOn = elements.annoyMode.checked ? "1" : "0";
+  }
   elements.aiReminderCopy.disabled = !enabled;
   elements.aiUseWeb.disabled = !enabled || !elements.aiReminderCopy.checked;
   elements.aiUseWebWrap.hidden = !enabled || !elements.aiReminderCopy.checked;
   elements.annoyInterval.disabled = true;
   elements.annoyIntervalWrap.hidden = true;
+}
+
+function renderAnnoyLevelIndicator() {
+  if (!elements.annoyLevel) {
+    return;
+  }
+
+  const level = Math.max(1, Math.min(10, Number(elements.annoyLevel.value || 5)));
+  if (elements.annoyLevelWrap?.dataset) {
+    elements.annoyLevelWrap.dataset.level = String(level);
+  }
+  if (elements.annoyLevelMeter) {
+    elements.annoyLevelMeter.style.setProperty("--annoy-level", String(level));
+  }
 }
 
 function setSubmitState(isSaving) {
@@ -196,6 +217,7 @@ function resetForm(dateValue = state.selectedDate) {
   elements.form.elements.endTime.value = formatTimeInput(end);
   elements.annoyLevel.value = "5";
   elements.annoyInterval.value = "10";
+  renderAnnoyLevelIndicator();
 
   Array.from(elements.form.querySelectorAll('input[name="memberIds"]')).forEach((input) => {
     input.checked = false;
@@ -251,6 +273,7 @@ function populateForm(eventItem) {
 
   toggleTimeFields();
   toggleNotificationFields();
+  renderAnnoyLevelIndicator();
 }
 
 async function loadStudio() {
@@ -305,7 +328,11 @@ function submissionBodyFromForm() {
     notificationTargetUserIds: formData.getAll("notificationTargetUserIds"),
     notificationOffsetsMinutes: formData.getAll("notificationOffsetsMinutes"),
     annoyMode: formData.get("annoyMode") === "on",
-    annoyLevel: formData.get("annoyLevel"),
+    // Read directly from the select rather than FormData, because disabled
+    // form controls are silently dropped by FormData. The select can briefly
+    // be disabled (e.g. before notifications are enabled), and we still want
+    // its current value to round-trip to the server.
+    annoyLevel: elements.annoyLevel?.value ?? formData.get("annoyLevel"),
     aiGenerated: formData.get("aiGenerated") === "on",
     aiUseWeb: formData.get("aiUseWeb") === "on",
     annoyIntervalMinutes: formData.get("annoyIntervalMinutes")
@@ -419,6 +446,10 @@ elements.form.elements.allDay.addEventListener("change", toggleTimeFields);
 elements.notificationsEnabled.addEventListener("change", toggleNotificationFields);
 elements.annoyMode.addEventListener("change", toggleNotificationFields);
 elements.aiReminderCopy.addEventListener("change", toggleNotificationFields);
+if (elements.annoyLevel) {
+  elements.annoyLevel.addEventListener("change", renderAnnoyLevelIndicator);
+  elements.annoyLevel.addEventListener("input", renderAnnoyLevelIndicator);
+}
 elements.deleteEvent.addEventListener("click", handleDelete);
 
 loadStudio().catch((error) => {

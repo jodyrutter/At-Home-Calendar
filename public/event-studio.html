@@ -166,9 +166,18 @@
                     <input id="event-annoy-mode" name="annoyMode" type="checkbox" />
                     Keep bugging them until the event starts
                   </label>
-                  <label id="event-annoy-level-wrap" hidden>
-                    Annoyance level
+                  <label id="event-annoy-level-wrap" class="annoy-level-field" hidden>
+                    <span class="annoy-level-label">
+                      Annoyance level
+                      <span class="annoy-level-hint">1 = soft nudge, 10 = chaos</span>
+                    </span>
                     <select id="event-annoy-level" name="annoyLevel"></select>
+                    <span id="event-annoy-level-meter" class="annoy-level-meter" aria-hidden="true">
+                      <span class="annoy-level-meter-fill"></span>
+                      <span class="annoy-level-meter-ticks">
+                        <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+                      </span>
+                    </span>
                   </label>
                   <label class="checkbox-field">
                     <input id="event-ai-reminders" name="aiGenerated" type="checkbox" />
@@ -204,5 +213,6 @@
     <script type="module" src="/mobile-bridge.js"></script>
     <script type="module" src="/nav.js"></script>
     <script type="module" src="/event-studio.js"></script>
+    <script type="module" src="/effects.js"></script>
   </body>
 </html>
