@@ -211,11 +211,23 @@
                       <input id="event-annoy-mode" name="annoyMode" type="checkbox" />
                       Keep bugging them until the event starts
                     </label>
+                    <label id="event-annoy-level-wrap" hidden>
+                      Annoyance level
+                      <select id="event-annoy-level" name="annoyLevel"></select>
+                    </label>
+                    <label class="checkbox-field">
+                      <input id="event-ai-reminders" name="aiGenerated" type="checkbox" />
+                      Let Jody AI write the notification messages
+                    </label>
+                    <label id="event-ai-use-web-wrap" class="checkbox-field" hidden>
+                      <input id="event-ai-use-web" name="aiUseWeb" type="checkbox" />
+                      Allow Jody AI to use web search while writing these reminders
+                    </label>
                     <label id="event-annoy-interval-wrap" hidden>
                       Annoy cadence
                       <select id="event-annoy-interval" name="annoyIntervalMinutes"></select>
                     </label>
-                    <p class="muted">These reminders sync to the Android app and get scheduled on the phone for the selected accounts.</p>
+                    <p class="muted">These reminders sync to the Android app. Annoy mode escalates across the last 2 hours before the event, and completed tasks stop future nudges for that signed-in user.</p>
                   </div>
                 </fieldset>
               </div>

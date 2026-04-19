@@ -1568,6 +1568,11 @@ a.button {
   padding: 14px 16px;
 }
 
+.event-card-highlight {
+  border-color: rgba(221, 107, 32, 0.45);
+  box-shadow: 0 0 0 1px rgba(221, 107, 32, 0.2), 0 22px 40px rgba(221, 107, 32, 0.12);
+}
+
 .event-card h3,
 .member-card h3,
 .bulletin-card h3 {
@@ -1794,6 +1799,12 @@ fieldset {
   gap: 8px;
 }
 
+#event-annoy-level-wrap,
+#event-ai-use-web-wrap {
+  display: grid;
+  gap: 8px;
+}
+
 html[data-mobile-app="true"] .page-shell {
   width: min(100% - 12px, 100%);
   padding-top: 12px;
@@ -1805,6 +1816,8 @@ html[data-mobile-app="true"] .site-nav {
   top: 10px;
   z-index: 20;
   margin-bottom: 14px;
+  align-items: stretch;
+  flex-direction: column;
 }
 
 html[data-mobile-app="true"] .hero {
@@ -1840,14 +1853,32 @@ html[data-mobile-app="true"] .account-layout {
   gap: 14px;
 }
 
+html[data-mobile-app="true"] .nav-brand {
+  align-self: flex-start;
+}
+
+html[data-mobile-app="true"] .nav-tools {
+  width: 100%;
+  display: grid;
+  gap: 12px;
+}
+
 html[data-mobile-app="true"] .nav-links {
-  flex-wrap: nowrap;
-  overflow-x: auto;
-  padding-bottom: 4px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  width: 100%;
 }
 
 html[data-mobile-app="true"] .nav-link {
+  min-width: 0;
+  width: 100%;
   white-space: nowrap;
+}
+
+html[data-mobile-app="true"] .theme-toggle {
+  width: 100%;
+  justify-content: space-between;
 }
 
 .form-error,
@@ -2072,6 +2103,10 @@ html[data-theme="dark"] .link-button {
     justify-content: center;
   }
 
+  .nav-links {
+    width: 100%;
+  }
+
   .calendar-grid {
     gap: 8px;
   }
@@ -2110,12 +2145,12 @@ html[data-theme="dark"] .link-button {
   }
 
   html[data-mobile-app="true"] .site-nav {
-    justify-content: space-between;
+    justify-content: flex-start;
   }
 
   html[data-mobile-app="true"] .nav-tools {
     width: 100%;
-    flex-direction: column;
+    grid-template-columns: 1fr;
     align-items: stretch;
   }
 }

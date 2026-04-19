@@ -52,6 +52,9 @@ const PERMISSION_LEVELS = ["default", "trusted", "family", "admin"];
 const PAGE_KEYS = ["calendar", "gallery", "assistant"];
 const EVENT_NOTIFICATION_OFFSET_OPTIONS = [1440, 180, 60, 10, 0];
 const EVENT_NOTIFICATION_REPEAT_INTERVAL_OPTIONS = [5, 10, 15, 30];
+const EVENT_NOTIFICATION_ANNOY_LEVEL_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+const EVENT_NOTIFICATION_MAX_AI_MESSAGES = 10;
+const EVENT_NOTIFICATION_ANNOY_WINDOW_MINUTES = 120;
 const MOBILE_REMINDER_LOOKAHEAD_DAYS = 45;
 const VISIBILITY_RANKS = new Map([
   ["public", 0],
@@ -143,6 +146,7 @@ function defaultData() {
     events: [],
     bulletins: [],
     mediaViews: {},
+    reminderDraftJobs: {},
     security: {
       remoteAccess: {
         passwordHash: null,
@@ -240,6 +244,8 @@ const mediaIndexCache = new Map();
 const pendingMediaIndexJobs = new Map();
 const authSessions = new Map();
 const authRateLimitBuckets = new Map();
+let reminderDraftProcessingPromise = null;
+let reminderDraftKickScheduled = false;
 
 if (!Array.isArray(db.data.events)) {
   db.data.events = [];
@@ -251,6 +257,10 @@ if (!Array.isArray(db.data.bulletins)) {
 
 if (!db.data.mediaViews || typeof db.data.mediaViews !== "object") {
   db.data.mediaViews = {};
+}
+
+if (!db.data.reminderDraftJobs || typeof db.data.reminderDraftJobs !== "object") {
+  db.data.reminderDraftJobs = {};
 }
 
 if (!db.data.security || typeof db.data.security !== "object") {
@@ -423,6 +433,9 @@ for (const device of db.data.security.devices) {
 db.data.security.devices = db.data.security.devices.filter((device) => device.id);
 
 await db.write();
+if (Object.keys(reminderDraftJobs()).length > 0) {
+  scheduleReminderDraftProcessing();
+}
 
 function sortEvents(events) {
   return [...events].sort((left, right) => {
@@ -585,7 +598,7 @@ function normalizeEventPayload(payload, existingEvent = null) {
     return { error: "Choose at least one account to notify." };
   }
 
-  if (notifications.enabled && notifications.offsetsMinutes.length === 0) {
+  if (notifications.enabled && notificationScheduleOffsets(notifications).length === 0) {
     return { error: "Choose at least one reminder time." };
   }
 
@@ -652,6 +665,10 @@ function snapshot(request = null) {
     annoyIntervalOptions: EVENT_NOTIFICATION_REPEAT_INTERVAL_OPTIONS.map((intervalMinutes) => ({
       intervalMinutes,
       label: `Every ${intervalMinutes} min`
+    })),
+    annoyLevelOptions: EVENT_NOTIFICATION_ANNOY_LEVEL_OPTIONS.map((level) => ({
+      level,
+      label: level === 1 ? "1 • Gentle nudge" : level === 10 ? "10 • Maximum chaos" : `${level} • Level ${level}`
     })),
     storage: {
       driver: db.driver
@@ -747,6 +764,75 @@ function normalizeNotificationRepeatInterval(value, fallback = 10) {
   return EVENT_NOTIFICATION_REPEAT_INTERVAL_OPTIONS.includes(interval) ? interval : fallback;
 }
 
+function normalizeNotificationAnnoyLevel(value, fallback = 5) {
+  const level = Number.parseInt(String(value ?? fallback), 10);
+  return EVENT_NOTIFICATION_ANNOY_LEVEL_OPTIONS.includes(level) ? level : fallback;
+}
+
+function normalizeReminderCompletionMap(value) {
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([userId, completedAt]) => [String(userId || "").trim(), String(completedAt || "").trim()])
+      .filter(([userId, completedAt]) => userId && completedAt && !Number.isNaN(new Date(completedAt).getTime()))
+  );
+}
+
+function stripJsonFence(text) {
+  const value = String(text || "").trim();
+  if (!value.startsWith("```")) {
+    return value;
+  }
+
+  return value
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/, "")
+    .trim();
+}
+
+function extractJsonPayload(text) {
+  const normalized = stripJsonFence(text);
+  const objectStart = normalized.indexOf("{");
+  const objectEnd = normalized.lastIndexOf("}");
+  if (objectStart >= 0 && objectEnd > objectStart) {
+    return normalized.slice(objectStart, objectEnd + 1);
+  }
+
+  const arrayStart = normalized.indexOf("[");
+  const arrayEnd = normalized.lastIndexOf("]");
+  if (arrayStart >= 0 && arrayEnd > arrayStart) {
+    return normalized.slice(arrayStart, arrayEnd + 1);
+  }
+
+  return normalized;
+}
+
+function sanitizeAiReminderMessages(messages, expectedCount = EVENT_NOTIFICATION_MAX_AI_MESSAGES) {
+  if (!Array.isArray(messages)) {
+    return [];
+  }
+
+  return messages
+    .slice(0, Math.max(0, expectedCount))
+    .map((entry, index) => ({
+      index: index + 1,
+      title: String(entry?.title || "").trim().slice(0, 80),
+      body: String(entry?.body || "").trim().slice(0, 220)
+    }))
+    .filter((entry) => entry.title || entry.body);
+}
+
+function reminderDraftJobs() {
+  return db.data.reminderDraftJobs;
+}
+
+function reminderDraftJob(eventId) {
+  return reminderDraftJobs()[String(eventId || "").trim()] || null;
+}
+
 function normalizeEventNotifications(payload, existingNotifications = null) {
   const source = payload && typeof payload === "object" ? payload : {};
   const enabled = normalizeBoolean(source.enabled);
@@ -763,18 +849,92 @@ function normalizeEventNotifications(payload, existingNotifications = null) {
     source.annoyIntervalMinutes ?? existingNotifications?.annoyIntervalMinutes,
     existingNotifications?.annoyIntervalMinutes ?? 10
   );
+  const annoyLevel = normalizeNotificationAnnoyLevel(
+    source.annoyLevel ?? existingNotifications?.annoyLevel,
+    existingNotifications?.annoyLevel ?? 5
+  );
+  const aiGenerated = enabled ? normalizeBoolean(source.aiGenerated ?? existingNotifications?.aiGenerated) : false;
+  const aiUseWeb = aiGenerated ? normalizeBoolean(source.aiUseWeb ?? existingNotifications?.aiUseWeb) : false;
+  const aiStatus = aiGenerated
+    ? String(source.aiStatus || existingNotifications?.aiStatus || "pending").trim().toLowerCase()
+    : "disabled";
+  const aiGeneratedAt = aiGenerated ? String(source.aiGeneratedAt || existingNotifications?.aiGeneratedAt || "").trim() || null : null;
+  const aiLastError = aiGenerated ? String(source.aiLastError || existingNotifications?.aiLastError || "").trim() || null : null;
+  const aiMessages = aiGenerated
+    ? sanitizeAiReminderMessages(
+        source.aiMessages ?? existingNotifications?.aiMessages,
+        Math.max(EVENT_NOTIFICATION_MAX_AI_MESSAGES, normalizeNotificationAnnoyLevel(source.annoyLevel ?? existingNotifications?.annoyLevel, 5))
+      )
+    : [];
+  const completedBy = normalizeReminderCompletionMap(source.completedBy ?? existingNotifications?.completedBy);
 
   return {
     enabled,
     targetUserIds: enabled ? targetUserIds : [],
     offsetsMinutes: enabled ? offsetsMinutes : [],
     annoyMode: enabled ? annoyMode : false,
-    annoyIntervalMinutes: enabled ? annoyIntervalMinutes : 10
+    annoyIntervalMinutes: enabled ? annoyIntervalMinutes : 10,
+    annoyLevel: enabled ? annoyLevel : 5,
+    aiGenerated: enabled ? aiGenerated : false,
+    aiUseWeb: enabled && aiGenerated ? aiUseWeb : false,
+    aiStatus: enabled && aiGenerated ? (["pending", "ready", "error", "processing"].includes(aiStatus) ? aiStatus : "pending") : "disabled",
+    aiGeneratedAt,
+    aiLastError,
+    aiMessages,
+    completedBy
   };
 }
 
 function sanitizeStoredEventNotifications(notifications) {
   return normalizeEventNotifications(notifications, notifications);
+}
+
+function notificationScheduleOffsets(notifications) {
+  const schedule = new Set((notifications.offsetsMinutes || []).map((offsetMinutes) => Number(offsetMinutes)));
+
+  if (notifications.annoyMode) {
+    const count = normalizeNotificationAnnoyLevel(notifications.annoyLevel, 5);
+    if (count === 1) {
+      schedule.add(0);
+    } else {
+      for (let index = 0; index < count; index += 1) {
+        const ratio = index / Math.max(1, count - 1);
+        const offsetMinutes = Math.round(EVENT_NOTIFICATION_ANNOY_WINDOW_MINUTES * (1 - ratio));
+        schedule.add(Math.max(0, offsetMinutes));
+      }
+    }
+  }
+
+  return [...schedule]
+    .filter((offsetMinutes) => Number.isFinite(offsetMinutes) && offsetMinutes >= 0)
+    .sort((left, right) => right - left);
+}
+
+function reminderFallbackMessage(event, notifications, offsetMinutes, sequenceNumber, totalNotifications) {
+  const title = offsetMinutes === 0 ? `${event.title} starts now` : `${event.title} is coming up`;
+  const bodyParts = [formatReminderEventTime(event)];
+  if (event.location) {
+    bodyParts.push(event.location);
+  }
+  if (offsetMinutes > 0) {
+    bodyParts.unshift(notificationOffsetLabel(offsetMinutes));
+  }
+  if (notifications.annoyMode) {
+    bodyParts.push(`Annoy level ${normalizeNotificationAnnoyLevel(notifications.annoyLevel, 5)} • ping ${sequenceNumber}/${totalNotifications}`);
+  }
+
+  return {
+    title,
+    body: bodyParts.filter(Boolean).join(" | ")
+  };
+}
+
+function reminderCompletionForUser(event, userId) {
+  if (!userId) {
+    return null;
+  }
+
+  return event?.notifications?.completedBy?.[userId] || null;
 }
 
 function reminderTimelineEntries(event, notifications, user, now, lookaheadLimit) {
@@ -783,63 +943,48 @@ function reminderTimelineEntries(event, notifications, user, now, lookaheadLimit
     return [];
   }
 
-  const seenKeys = new Set();
   const entries = [];
-  for (const offsetMinutes of notifications.offsetsMinutes) {
-    const triggerTimes = [new Date(eventStart.getTime() - offsetMinutes * 60 * 1000)];
+  const scheduleOffsets = notificationScheduleOffsets(notifications);
+  const totalNotifications = scheduleOffsets.length;
 
-    if (notifications.annoyMode && notifications.annoyIntervalMinutes > 0) {
-      let nextMinutes = offsetMinutes - notifications.annoyIntervalMinutes;
-      while (nextMinutes >= 0) {
-        triggerTimes.push(new Date(eventStart.getTime() - nextMinutes * 60 * 1000));
-        nextMinutes -= notifications.annoyIntervalMinutes;
-      }
+  for (const [index, offsetMinutes] of scheduleOffsets.entries()) {
+    const triggerAt = new Date(eventStart.getTime() - offsetMinutes * 60 * 1000);
+    if (triggerAt < now || triggerAt > lookaheadLimit) {
+      continue;
     }
 
-    for (const triggerAt of triggerTimes) {
-      if (triggerAt < now || triggerAt > lookaheadLimit) {
-        continue;
-      }
+    const reminderKey = `${event.id}:${user.id}:${offsetMinutes}`;
+    const generatedMessage = notifications.aiMessages?.[index] || null;
+    const fallbackMessage = reminderFallbackMessage(event, notifications, offsetMinutes, index + 1, totalNotifications);
+    const eventUrl = new URL("/", "https://hearthboard.local");
+    eventUrl.searchParams.set("date", event.start.slice(0, 10));
+    eventUrl.searchParams.set("event", event.id);
 
-      const effectiveOffsetMinutes = Math.max(0, Math.round((eventStart.getTime() - triggerAt.getTime()) / 60000));
-      const reminderKey = `${event.id}:${user.id}:${effectiveOffsetMinutes}`;
-      if (seenKeys.has(reminderKey)) {
-        continue;
-      }
-      seenKeys.add(reminderKey);
-
-      const title = effectiveOffsetMinutes === 0 ? `${event.title} starts now` : `${event.title} is coming up`;
-      const bodyParts = [formatReminderEventTime(event)];
-      if (event.location) {
-        bodyParts.push(event.location);
-      }
-      if (effectiveOffsetMinutes > 0) {
-        bodyParts.unshift(notificationOffsetLabel(effectiveOffsetMinutes));
-      }
-      if (notifications.annoyMode && effectiveOffsetMinutes !== offsetMinutes) {
-        bodyParts.push(`Annoy mode every ${notifications.annoyIntervalMinutes} min`);
-      }
-
-      entries.push({
-        reminderId: reminderKey,
-        eventId: event.id,
-        eventTitle: event.title,
-        title,
-        body: bodyParts.filter(Boolean).join(" | "),
-        scheduleAt: triggerAt.toISOString(),
-        eventStart: event.start,
-        eventEnd: event.end,
-        offsetMinutes: effectiveOffsetMinutes,
-        offsetLabel: notificationOffsetLabel(effectiveOffsetMinutes),
-        location: event.location || "",
-        category: event.category || "General",
-        allDay: Boolean(event.allDay),
-        annoyMode: Boolean(notifications.annoyMode),
-        annoyIntervalMinutes: notifications.annoyIntervalMinutes,
-        eventUrl: "/",
-        updatedAt: event.updatedAt || event.createdAt || event.start
-      });
-    }
+    entries.push({
+      reminderId: reminderKey,
+      eventId: event.id,
+      eventTitle: event.title,
+      title: generatedMessage?.title || fallbackMessage.title,
+      body: generatedMessage?.body || fallbackMessage.body,
+      scheduleAt: triggerAt.toISOString(),
+      eventStart: event.start,
+      eventEnd: event.end,
+      offsetMinutes,
+      offsetLabel: notificationOffsetLabel(offsetMinutes),
+      location: event.location || "",
+      category: event.category || "General",
+      allDay: Boolean(event.allDay),
+      annoyMode: Boolean(notifications.annoyMode),
+      annoyIntervalMinutes: notifications.annoyIntervalMinutes,
+      annoyLevel: normalizeNotificationAnnoyLevel(notifications.annoyLevel, 5),
+      aiGenerated: Boolean(notifications.aiGenerated),
+      aiStatus: notifications.aiStatus || "disabled",
+      sequenceNumber: index + 1,
+      totalNotifications,
+      completedAt: reminderCompletionForUser(event, user.id),
+      eventUrl: `${eventUrl.pathname}${eventUrl.search}`,
+      updatedAt: event.updatedAt || event.createdAt || event.start
+    });
   }
 
   return entries;
@@ -856,6 +1001,10 @@ function upcomingReminderEntriesForUser(user, now = new Date()) {
     .flatMap((event) => {
       const notifications = sanitizeStoredEventNotifications(event.notifications);
       if (!notifications.enabled || !notifications.targetUserIds.includes(user.id)) {
+        return [];
+      }
+
+      if (reminderCompletionForUser(event, user.id)) {
         return [];
       }
 
@@ -1653,6 +1802,9 @@ async function updateLocalAiPolicy(allowed, updatedBy = null) {
     updatedBy: updatedBy || null
   };
   await db.write();
+  if (db.data.security.localAi.allowed) {
+    scheduleReminderDraftProcessing();
+  }
   return localAiPolicy();
 }
 
@@ -2348,6 +2500,273 @@ async function waitForAssistantLoadedState(expectedLoaded, timeoutMs = 4000, pol
   }
 
   return latestStatus;
+}
+
+function reminderDraftEvent(eventId) {
+  return db.data.events.find((entry) => entry.id === eventId) || null;
+}
+
+function reminderDraftQueryForEvent(event) {
+  return [event.title, event.description, event.location, event.category].filter(Boolean).join(" ");
+}
+
+function buildReminderDraftPrompt(event, notifications, scheduleOffsets, searchContext = null) {
+  const timeline = scheduleOffsets
+    .map((offsetMinutes, index) => `${index + 1}. ${offsetMinutes === 0 ? "At start time" : `${offsetMinutes} minutes before start`}`)
+    .join("\n");
+  const webContext = searchContext?.sources?.length
+    ? `Web context:\n${buildWebSearchPrompt(reminderDraftQueryForEvent(event), searchContext)}`
+    : "";
+
+  return [
+    "Return strict JSON only.",
+    "Schema: {\"notifications\":[{\"title\":\"...\",\"body\":\"...\"}]}",
+    `Generate ${scheduleOffsets.length} distinct push notification messages for a household task/event.`,
+    "Make them increasingly urgent as the event gets closer.",
+    "They should be annoying, varied, and a little funny, but not threatening, abusive, or unsafe.",
+    "Keep titles under 60 characters and bodies under 160 characters.",
+    "Do not include markdown.",
+    `Event title: ${event.title}`,
+    `Description: ${event.description || "None provided."}`,
+    `Location: ${event.location || "No location."}`,
+    `Category: ${event.category || "General"}`,
+    `All day: ${event.allDay ? "yes" : "no"}`,
+    `Starts at: ${formatReminderEventTime(event)}`,
+    `Annoyance level: ${normalizeNotificationAnnoyLevel(notifications.annoyLevel, 5)} of 10`,
+    `Notification order, from earliest to latest:\n${timeline}`,
+    webContext
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+async function generateAiReminderMessages(event, notifications, runtimeStatus) {
+  const scheduleOffsets = notificationScheduleOffsets(notifications).slice(0, EVENT_NOTIFICATION_MAX_AI_MESSAGES);
+  if (scheduleOffsets.length === 0) {
+    return { ok: true, messages: [], searchUsed: false };
+  }
+
+  const systemMessages = [
+    {
+      role: "system",
+      content: [
+        "You write push notifications for a private household app.",
+        "Return only valid JSON.",
+        "The JSON must match the requested schema exactly.",
+        "No prose before or after the JSON."
+      ].join(" ")
+    }
+  ];
+
+  let searchContext = null;
+  if (notifications.aiUseWeb) {
+    try {
+      searchContext = await gatherWebSearchContext(reminderDraftQueryForEvent(event));
+      systemMessages.push({ role: "system", content: WEB_SEARCH_SYSTEM_PROMPT });
+    } catch {
+      searchContext = null;
+    }
+  }
+
+  const prompt = buildReminderDraftPrompt(event, notifications, scheduleOffsets, searchContext);
+  const keepAlive = runtimeStatus.loaded ? runtimeStatus.awakeKeepAlive || OLLAMA_AWAKE_KEEP_ALIVE : OLLAMA_AWAKE_KEEP_ALIVE;
+
+  const ollamaResponse = await fetchOllama("/api/chat", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: runtimeStatus.activeModel,
+      stream: false,
+      keep_alive: keepAlive,
+      messages: [...systemMessages, { role: "user", content: prompt }]
+    })
+  });
+
+  const payload = await ollamaResponse.json().catch(() => ({}));
+  if (!ollamaResponse.ok) {
+    return {
+      ok: false,
+      error: payload?.error || "Jody AI could not draft reminder notifications."
+    };
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(extractJsonPayload(payload?.message?.content || ""));
+  } catch {
+    parsed = null;
+  }
+
+  const rawMessages = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray(parsed?.notifications)
+      ? parsed.notifications
+      : [];
+  const sanitized = sanitizeAiReminderMessages(rawMessages, scheduleOffsets.length);
+  const fallbackMessages = scheduleOffsets.map((offsetMinutes, index) =>
+    reminderFallbackMessage(event, notifications, offsetMinutes, index + 1, scheduleOffsets.length)
+  );
+  const messages = scheduleOffsets.map((_, index) => ({
+    index: index + 1,
+    title: sanitized[index]?.title || fallbackMessages[index].title,
+    body: sanitized[index]?.body || fallbackMessages[index].body
+  }));
+
+  return {
+    ok: true,
+    messages,
+    searchUsed: Boolean(searchContext?.sources?.length)
+  };
+}
+
+function queueReminderDraftGeneration(event, reason = "event-save") {
+  if (!event?.id) {
+    return false;
+  }
+
+  const notifications = sanitizeStoredEventNotifications(event.notifications);
+  if (!notifications.enabled || !notifications.aiGenerated) {
+    delete reminderDraftJobs()[event.id];
+    event.notifications = {
+      ...notifications,
+      aiStatus: "disabled",
+      aiGeneratedAt: null,
+      aiLastError: null,
+      aiMessages: []
+    };
+    return false;
+  }
+
+  event.notifications = {
+    ...notifications,
+    aiStatus: "pending",
+    aiGeneratedAt: null,
+    aiLastError: null,
+    aiMessages: []
+  };
+  reminderDraftJobs()[event.id] = {
+    eventId: event.id,
+    status: "pending",
+    reason,
+    attempts: Number(reminderDraftJob(event.id)?.attempts || 0),
+    queuedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    lastError: null
+  };
+  return true;
+}
+
+function markReminderDraftJobStatus(eventId, status, lastError = null) {
+  const existing = reminderDraftJob(eventId) || { eventId, attempts: 0, queuedAt: new Date().toISOString() };
+  reminderDraftJobs()[eventId] = {
+    ...existing,
+    status,
+    updatedAt: new Date().toISOString(),
+    lastError: lastError || null,
+    attempts: status === "processing" ? existing.attempts + 1 : existing.attempts
+  };
+}
+
+function scheduleReminderDraftProcessing() {
+  if (reminderDraftKickScheduled) {
+    return;
+  }
+
+  reminderDraftKickScheduled = true;
+  setTimeout(() => {
+    reminderDraftKickScheduled = false;
+    processReminderDraftQueue().catch(() => {});
+  }, 25);
+}
+
+async function processReminderDraftQueue() {
+  if (reminderDraftProcessingPromise) {
+    return reminderDraftProcessingPromise;
+  }
+
+  reminderDraftProcessingPromise = (async () => {
+    const pendingEventIds = Object.values(reminderDraftJobs())
+      .filter((job) => ["pending", "error"].includes(String(job?.status || "").trim().toLowerCase()))
+      .map((job) => job.eventId);
+    if (pendingEventIds.length === 0) {
+      return;
+    }
+
+    let runtimeStatus = await readAssistantRuntimeStatus();
+    if (!runtimeStatus.localAiAllowed || !runtimeStatus.reachable || !runtimeStatus.activeModel) {
+      return;
+    }
+
+    const wakeResult = await setAssistantPower("wake", runtimeStatus);
+    if (!wakeResult.ok) {
+      return;
+    }
+
+    runtimeStatus = await waitForAssistantLoadedState(true);
+    if (!runtimeStatus.loaded || !runtimeStatus.activeModel) {
+      return;
+    }
+
+    try {
+      for (const eventId of pendingEventIds) {
+        const event = reminderDraftEvent(eventId);
+        if (!event) {
+          delete reminderDraftJobs()[eventId];
+          continue;
+        }
+
+        const notifications = sanitizeStoredEventNotifications(event.notifications);
+        if (!notifications.enabled || !notifications.aiGenerated) {
+          delete reminderDraftJobs()[eventId];
+          continue;
+        }
+
+        markReminderDraftJobStatus(eventId, "processing");
+        event.notifications.aiStatus = "processing";
+        event.notifications.aiLastError = null;
+        await db.write();
+
+        let generation;
+        try {
+          generation = await generateAiReminderMessages(event, notifications, runtimeStatus);
+        } catch (error) {
+          generation = {
+            ok: false,
+            error: error?.name === "AbortError" ? "Jody AI took too long while writing reminder copy." : String(error?.message || error || "Unknown reminder draft error.")
+          };
+        }
+
+        if (!generation.ok) {
+          event.notifications.aiStatus = "error";
+          event.notifications.aiLastError = generation.error;
+          markReminderDraftJobStatus(eventId, "error", generation.error);
+          await db.write();
+          continue;
+        }
+
+        event.notifications.aiStatus = "ready";
+        event.notifications.aiGeneratedAt = new Date().toISOString();
+        event.notifications.aiLastError = null;
+        event.notifications.aiMessages = generation.messages;
+        delete reminderDraftJobs()[eventId];
+        await db.write();
+      }
+    } finally {
+      const latestStatus = await readAssistantRuntimeStatus();
+      if (latestStatus.loaded) {
+        await setAssistantPower("sleep", latestStatus).catch(() => {});
+        await waitForAssistantLoadedState(false).catch(() => {});
+      }
+    }
+  })();
+
+  try {
+    await reminderDraftProcessingPromise;
+  } finally {
+    reminderDraftProcessingPromise = null;
+  }
 }
 
 function normalizeVideoQuality(value) {
@@ -3687,6 +4106,47 @@ app.delete("/api/members/:memberId", async (request, response) => {
   return response.status(403).json({ error: "Household roster entries are tied to accounts now." });
 });
 
+app.post("/api/account/events/:eventId/completion", async (request, response) => {
+  const user = authenticatedUser(request);
+  if (!user) {
+    return response.status(401).json({ error: "Sign in to update your task status." });
+  }
+
+  const event = db.data.events.find((entry) => entry.id === request.params.eventId);
+  if (!event) {
+    return response.status(404).json({ error: "Event not found." });
+  }
+
+  const notifications = sanitizeStoredEventNotifications(event.notifications);
+  if (!notifications.enabled || !notifications.targetUserIds.includes(user.id)) {
+    return response.status(403).json({ error: "This event is not assigned to your reminder queue." });
+  }
+
+  const completed = normalizeBoolean(request.body?.completed ?? true);
+  const nextCompletedBy = {
+    ...normalizeReminderCompletionMap(notifications.completedBy)
+  };
+
+  if (completed) {
+    nextCompletedBy[user.id] = new Date().toISOString();
+  } else {
+    delete nextCompletedBy[user.id];
+  }
+
+  event.notifications = {
+    ...notifications,
+    completedBy: nextCompletedBy
+  };
+  await db.write();
+
+  return response.json({
+    ok: true,
+    eventId: event.id,
+    completed,
+    completedAt: nextCompletedBy[user.id] || null
+  });
+});
+
 app.post("/api/events", async (request, response) => {
   const result = normalizeEventPayload(request.body);
   if (result.error) {
@@ -3694,7 +4154,9 @@ app.post("/api/events", async (request, response) => {
   }
 
   db.data.events.push(result.data);
+  queueReminderDraftGeneration(result.data);
   await db.write();
+  scheduleReminderDraftProcessing();
   return response.status(201).json(result.data);
 });
 
@@ -3710,7 +4172,9 @@ app.patch("/api/events/:eventId", async (request, response) => {
   }
 
   Object.assign(event, result.data);
+  queueReminderDraftGeneration(event, "event-update");
   await db.write();
+  scheduleReminderDraftProcessing();
   return response.json(event);
 });
 
@@ -3721,6 +4185,7 @@ app.delete("/api/events/:eventId", async (request, response) => {
     return response.status(404).json({ error: "Event not found." });
   }
 
+  delete reminderDraftJobs()[request.params.eventId];
   await db.write();
   return response.status(204).send();
 });

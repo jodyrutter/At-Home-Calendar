@@ -23,6 +23,22 @@ async function waitForServer(port) {
   throw new Error("Server did not become ready in time.");
 }
 
+async function waitForCondition(assertion, { timeoutMs = 5000, intervalMs = 150 } = {}) {
+  const startedAt = Date.now();
+  let lastError = null;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      return await assertion();
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+  }
+
+  throw lastError || new Error("Condition was not met in time.");
+}
+
 function remoteHeaders() {
   return {
     "X-Forwarded-Host": "203.0.113.10:42069",
@@ -1392,7 +1408,7 @@ test("annoy mode expands a single reminder into repeated upcoming nudges", async
   });
   assert.equal(approve.status, 200);
 
-  const start = new Date(Date.now() + 35 * 60 * 1000);
+  const start = new Date(Date.now() + 125 * 60 * 1000);
   const end = new Date(start.getTime() + 60 * 60 * 1000);
   const createEvent = await fetch(`http://127.0.0.1:${port}/api/events`, {
     method: "POST",
@@ -1410,8 +1426,9 @@ test("annoy mode expands a single reminder into repeated upcoming nudges", async
       notifications: {
         enabled: true,
         targetUserIds: [targetUser.id],
-        offsetsMinutes: [30],
+        offsetsMinutes: [],
         annoyMode: true,
+        annoyLevel: 4,
         annoyIntervalMinutes: 10
       },
       start: start.toISOString(),
@@ -1443,9 +1460,287 @@ test("annoy mode expands a single reminder into repeated upcoming nudges", async
   assert.equal(reminderPayload.reminders.length, 4);
   assert.deepEqual(
     reminderPayload.reminders.map((reminder) => reminder.offsetMinutes),
-    [30, 20, 10, 0]
+    [120, 80, 40, 0]
   );
   assert.ok(reminderPayload.reminders.every((reminder) => reminder.eventTitle === "Annoying event"));
+});
+
+test("completed reminder events disappear from the mobile reminder queue for that user", async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "hearthboard-"));
+  const port = 42137;
+  const server = spawn(process.execPath, ["server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: "127.0.0.1",
+      DATA_DIR: dataDir
+    },
+    stdio: "inherit"
+  });
+
+  t.after(() => {
+    server.kill();
+  });
+
+  await waitForServer(port);
+
+  const register = await fetch(`http://127.0.0.1:${port}/api/session/register`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      username: "taskuser",
+      password: "household123"
+    })
+  });
+  assert.equal(register.status, 201);
+
+  const adminCookie = await setAdminPasswordAndLogin(`http://127.0.0.1:${port}`);
+  const account = await fetch(`http://127.0.0.1:${port}/api/account`, {
+    headers: {
+      Cookie: adminCookie
+    }
+  });
+  const accountPayload = await account.json();
+  const targetUser = accountPayload.users.find((user) => user.username === "taskuser");
+  assert.ok(targetUser);
+
+  const approve = await fetch(`http://127.0.0.1:${port}/api/admin/users/${targetUser.id}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: adminCookie
+    },
+    body: JSON.stringify({
+      approved: true,
+      permissionLevel: "family",
+      householdMember: true
+    })
+  });
+  assert.equal(approve.status, 200);
+
+  const start = new Date(Date.now() + 90 * 60 * 1000);
+  const end = new Date(start.getTime() + 30 * 60 * 1000);
+  const createEvent = await fetch(`http://127.0.0.1:${port}/api/events`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: adminCookie
+    },
+    body: JSON.stringify({
+      title: "Finish the thing",
+      category: "Chores",
+      location: "",
+      description: "Please finish the thing.",
+      allDay: false,
+      memberIds: [],
+      notifications: {
+        enabled: true,
+        targetUserIds: [targetUser.id],
+        offsetsMinutes: [60, 10, 0]
+      },
+      start: start.toISOString(),
+      end: end.toISOString()
+    })
+  });
+  assert.equal(createEvent.status, 201);
+  const createdEvent = await createEvent.json();
+
+  const targetLogin = await fetch(`http://127.0.0.1:${port}/api/session/login`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      username: "taskuser",
+      password: "household123"
+    })
+  });
+  assert.equal(targetLogin.status, 200);
+  const targetCookie = cookieFromResponse(targetLogin, "hearthboard_session");
+
+  const beforeComplete = await fetch(`http://127.0.0.1:${port}/api/mobile/reminders`, {
+    headers: {
+      Cookie: targetCookie
+    }
+  });
+  assert.equal(beforeComplete.status, 200);
+  const beforePayload = await beforeComplete.json();
+  assert.equal(beforePayload.reminders.length, 3);
+
+  const completeResponse = await fetch(`http://127.0.0.1:${port}/api/account/events/${createdEvent.id}/completion`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: targetCookie
+    },
+    body: JSON.stringify({
+      completed: true
+    })
+  });
+  assert.equal(completeResponse.status, 200);
+
+  const afterComplete = await fetch(`http://127.0.0.1:${port}/api/mobile/reminders`, {
+    headers: {
+      Cookie: targetCookie
+    }
+  });
+  assert.equal(afterComplete.status, 200);
+  const afterPayload = await afterComplete.json();
+  assert.equal(afterPayload.reminders.length, 0);
+});
+
+test("pending AI reminder copy is generated after Jody AI is unrestricted again", async (t) => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "hearthboard-"));
+  const port = 42138;
+  const fakeOllama = await startFakeOllama({
+    models: ["qwen2.5:7b"],
+    reply: JSON.stringify({
+      notifications: [
+        { title: "First nudge", body: "Start getting ready." },
+        { title: "Second nudge", body: "Seriously, move now." },
+        { title: "Final nudge", body: "This is your last warning." }
+      ]
+    })
+  });
+  const server = spawn(process.execPath, ["server.js"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: "127.0.0.1",
+      DATA_DIR: dataDir,
+      OLLAMA_BASE_URL: fakeOllama.baseUrl,
+      OLLAMA_MODEL: "hearthboard-assistant",
+      OLLAMA_FALLBACK_MODEL: "qwen2.5:7b",
+      OLLAMA_KEEP_ALIVE: "0"
+    },
+    stdio: "inherit"
+  });
+
+  t.after(async () => {
+    server.kill();
+    await fakeOllama.close();
+  });
+
+  await waitForServer(port);
+
+  const restrictResponse = await fetch(`http://127.0.0.1:${port}/api/local-ai/policy`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      allowed: false
+    })
+  });
+  assert.equal(restrictResponse.status, 200);
+
+  const register = await fetch(`http://127.0.0.1:${port}/api/session/register`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      username: "aitarget",
+      password: "household123"
+    })
+  });
+  assert.equal(register.status, 201);
+
+  const adminCookie = await setAdminPasswordAndLogin(`http://127.0.0.1:${port}`);
+  const account = await fetch(`http://127.0.0.1:${port}/api/account`, {
+    headers: {
+      Cookie: adminCookie
+    }
+  });
+  const accountPayload = await account.json();
+  const targetUser = accountPayload.users.find((user) => user.username === "aitarget");
+  assert.ok(targetUser);
+
+  const approve = await fetch(`http://127.0.0.1:${port}/api/admin/users/${targetUser.id}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: adminCookie
+    },
+    body: JSON.stringify({
+      approved: true,
+      permissionLevel: "family",
+      householdMember: true
+    })
+  });
+  assert.equal(approve.status, 200);
+
+  const start = new Date(Date.now() + 3 * 60 * 60 * 1000);
+  const end = new Date(start.getTime() + 30 * 60 * 1000);
+  const createEvent = await fetch(`http://127.0.0.1:${port}/api/events`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Cookie: adminCookie
+    },
+    body: JSON.stringify({
+      title: "AI task",
+      category: "General",
+      location: "Desk",
+      description: "Finish the AI-powered task.",
+      allDay: false,
+      memberIds: [],
+      notifications: {
+        enabled: true,
+        targetUserIds: [targetUser.id],
+        offsetsMinutes: [60, 10, 0],
+        aiGenerated: true,
+        aiUseWeb: false
+      },
+      start: start.toISOString(),
+      end: end.toISOString()
+    })
+  });
+  assert.equal(createEvent.status, 201);
+  const createdEvent = await createEvent.json();
+  assert.equal(createdEvent.notifications.aiStatus, "pending");
+
+  const targetLogin = await fetch(`http://127.0.0.1:${port}/api/session/login`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      username: "aitarget",
+      password: "household123"
+    })
+  });
+  assert.equal(targetLogin.status, 200);
+  const targetCookie = cookieFromResponse(targetLogin, "hearthboard_session");
+
+  const allowResponse = await fetch(`http://127.0.0.1:${port}/api/local-ai/policy`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      allowed: true
+    })
+  });
+  assert.equal(allowResponse.status, 200);
+
+  await waitForCondition(async () => {
+    const reminderResponse = await fetch(`http://127.0.0.1:${port}/api/mobile/reminders`, {
+      headers: {
+        Cookie: targetCookie
+      }
+    });
+    assert.equal(reminderResponse.status, 200);
+    const reminderPayload = await reminderResponse.json();
+    assert.equal(reminderPayload.reminders.length, 3);
+    assert.equal(reminderPayload.reminders[0].title, "First nudge");
+    assert.equal(reminderPayload.reminders[1].title, "Second nudge");
+    assert.equal(reminderPayload.reminders[2].title, "Final nudge");
+  }, { timeoutMs: 7000, intervalMs: 200 });
 });
 
 test("remote gallery hides authenticated libraries until a user signs in", async (t) => {

@@ -7,13 +7,15 @@ const state = {
   notificationTargets: [],
   reminderOptions: [],
   annoyIntervalOptions: [],
+  annoyLevelOptions: [],
   currentUser: null,
   selectedDate: toDateKey(new Date()),
   visibleMonth: startOfMonth(new Date()),
   activeFilters: new Set(),
   editingEventId: null,
   editingBulletinId: null,
-  filtersInitialized: false
+  filtersInitialized: false,
+  highlightedEventId: new URLSearchParams(window.location.search).get("event") || ""
 };
 
 const weekdayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -49,6 +51,11 @@ const elements = {
   notificationTargetCheckboxes: document.querySelector("#notification-target-checkboxes"),
   notificationOffsetCheckboxes: document.querySelector("#notification-offset-checkboxes"),
   annoyMode: document.querySelector("#event-annoy-mode"),
+  annoyLevelWrap: document.querySelector("#event-annoy-level-wrap"),
+  annoyLevel: document.querySelector("#event-annoy-level"),
+  aiReminderCopy: document.querySelector("#event-ai-reminders"),
+  aiUseWeb: document.querySelector("#event-ai-use-web"),
+  aiUseWebWrap: document.querySelector("#event-ai-use-web-wrap"),
   annoyIntervalWrap: document.querySelector("#event-annoy-interval-wrap"),
   annoyInterval: document.querySelector("#event-annoy-interval"),
   eventFormError: document.querySelector("#event-form-error"),
@@ -140,6 +147,10 @@ function annoyIntervalOption(intervalMinutes) {
   return state.annoyIntervalOptions.find((option) => option.intervalMinutes === intervalMinutes) || null;
 }
 
+function annoyLevelOption(level) {
+  return state.annoyLevelOptions.find((option) => option.level === level) || null;
+}
+
 function eventNotificationSummary(event) {
   const notifications = event.notifications || {};
   if (!notifications.enabled) {
@@ -154,10 +165,16 @@ function eventNotificationSummary(event) {
     .map((offsetMinutes) => reminderOption(offsetMinutes)?.label || `${offsetMinutes} min before`)
     .join(", ");
   const annoyLabel = notifications.annoyMode
-    ? `Annoy: ${annoyIntervalOption(notifications.annoyIntervalMinutes)?.label || `Every ${notifications.annoyIntervalMinutes || 10} min`}`
+    ? `Annoy: ${annoyLevelOption(notifications.annoyLevel)?.label || `Level ${notifications.annoyLevel || 5}`}`
+    : "";
+  const aiLabel = notifications.aiGenerated
+    ? `Jody AI: ${notifications.aiStatus === "ready" ? "ready" : notifications.aiStatus === "error" ? "retry needed" : notifications.aiStatus || "pending"}${notifications.aiUseWeb ? " + web" : ""}`
+    : "";
+  const doneLabel = state.currentUser && notifications.completedBy?.[state.currentUser.id]
+    ? "Done"
     : "";
 
-  return [targetLabels ? `Notify: ${targetLabels}` : "", offsetLabels ? `When: ${offsetLabels}` : "", annoyLabel]
+  return [targetLabels ? `Notify: ${targetLabels}` : "", offsetLabels ? `When: ${offsetLabels}` : "", annoyLabel, aiLabel, doneLabel]
     .filter(Boolean)
     .join(" | ");
 }
@@ -235,6 +252,7 @@ async function loadBoard() {
   state.notificationTargets = payload.notificationTargets || [];
   state.reminderOptions = payload.reminderOptions || [];
   state.annoyIntervalOptions = payload.annoyIntervalOptions || [];
+  state.annoyLevelOptions = payload.annoyLevelOptions || [];
   state.currentUser = payload.currentUser || null;
 
   const validMemberIds = new Set(payload.members.map((member) => member.id));
@@ -243,6 +261,14 @@ async function loadBoard() {
   if (!state.filtersInitialized) {
     payload.members.forEach((member) => state.activeFilters.add(member.id));
     state.filtersInitialized = true;
+  }
+
+  if (!elements.eventForm.dataset.initialized) {
+    const dateParam = new URLSearchParams(window.location.search).get("date");
+    if (dateParam) {
+      state.selectedDate = dateParam;
+      state.visibleMonth = startOfMonth(parseDateKey(dateParam));
+    }
   }
 
   render();
@@ -263,6 +289,21 @@ function render() {
   renderMembers();
   renderMemberCheckboxes();
   renderNotificationCheckboxes();
+  scrollHighlightedEventIntoView();
+}
+
+function scrollHighlightedEventIntoView() {
+  if (!state.highlightedEventId) {
+    return;
+  }
+
+  const highlighted = document.querySelector(`.event-card[data-event-id="${state.highlightedEventId}"]`);
+  if (!highlighted) {
+    return;
+  }
+
+  highlighted.scrollIntoView({ behavior: "smooth", block: "center" });
+  state.highlightedEventId = "";
 }
 
 function renderHeader() {
@@ -456,6 +497,7 @@ function renderNotificationCheckboxes() {
   elements.notificationTargetCheckboxes.innerHTML = "";
   elements.notificationOffsetCheckboxes.innerHTML = "";
   elements.annoyInterval.innerHTML = "";
+  elements.annoyLevel.innerHTML = "";
 
   state.notificationTargets.forEach((target) => {
     const label = document.createElement("label");
@@ -481,16 +523,29 @@ function renderNotificationCheckboxes() {
     element.textContent = option.label;
     elements.annoyInterval.append(element);
   });
+
+  state.annoyLevelOptions.forEach((option) => {
+    const element = document.createElement("option");
+    element.value = String(option.level);
+    element.textContent = option.label;
+    elements.annoyLevel.append(element);
+  });
 }
 
 function eventCard(event, includeEdit = true) {
   const article = document.createElement("article");
   article.className = "event-card";
+  article.dataset.eventId = event.id;
+  if (state.highlightedEventId && state.highlightedEventId === event.id) {
+    article.classList.add("event-card-highlight");
+  }
 
   const assignedNames = event.memberIds
     .map((memberId) => getMember(memberId)?.name)
     .filter(Boolean)
     .join(", ");
+  const completedAt = currentUserCompletion(event);
+  const canComplete = currentUserCanComplete(event);
 
   article.innerHTML = `
     <h3>${event.title}</h3>
@@ -498,19 +553,39 @@ function eventCard(event, includeEdit = true) {
     <p class="event-card-meta">${event.category}${event.location ? ` | ${event.location}` : ""}</p>
     <p class="event-card-meta">${assignedNames || "Unassigned"}</p>
     ${eventNotificationSummary(event) ? `<p class="event-card-meta">${eventNotificationSummary(event)}</p>` : ""}
+    ${completedAt ? `<p class="event-card-meta">Done by you at ${formatTimestamp(completedAt)}</p>` : ""}
     ${event.description ? `<p class="event-card-meta">${event.description}</p>` : ""}
   `;
 
-  if (includeEdit) {
+  if (includeEdit || canComplete) {
     const actions = document.createElement("div");
     actions.className = "event-card-actions";
 
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "link-button";
-    button.textContent = "Edit";
-    button.addEventListener("click", () => openEventModal(event));
-    actions.append(button);
+    if (canComplete) {
+      const completeButton = document.createElement("button");
+      completeButton.type = "button";
+      completeButton.className = "link-button";
+      completeButton.textContent = completedAt ? "Mark not done" : "Mark done";
+      completeButton.addEventListener("click", async () => {
+        try {
+          await setEventCompletion(event.id, !completedAt);
+        } catch (error) {
+          elements.eventFormError.textContent = error.message;
+          elements.eventFormError.hidden = false;
+        }
+      });
+      actions.append(completeButton);
+    }
+
+    if (includeEdit) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "link-button";
+      button.textContent = "Edit";
+      button.addEventListener("click", () => openEventModal(event));
+      actions.append(button);
+    }
+
     article.append(actions);
   }
 
@@ -543,6 +618,22 @@ function bulletinCard(bulletin) {
 
 function emptyStateNode() {
   return elements.emptyStateTemplate.content.firstElementChild.cloneNode(true);
+}
+
+function currentUserCompletion(event) {
+  return state.currentUser ? event.notifications?.completedBy?.[state.currentUser.id] || null : null;
+}
+
+function currentUserCanComplete(event) {
+  return Boolean(state.currentUser && event.notifications?.enabled && event.notifications?.targetUserIds?.includes(state.currentUser.id));
+}
+
+async function setEventCompletion(eventId, completed) {
+  await api(`/api/account/events/${eventId}/completion`, {
+    method: "POST",
+    body: JSON.stringify({ completed })
+  });
+  await loadBoard();
 }
 
 function showEventStudio() {
@@ -597,6 +688,9 @@ function resetEventForm(dateValue = state.selectedDate) {
   });
   elements.notificationsEnabled.checked = false;
   elements.annoyMode.checked = false;
+  elements.annoyLevel.value = "5";
+  elements.aiReminderCopy.checked = false;
+  elements.aiUseWeb.checked = false;
   elements.annoyInterval.value = "10";
   Array.from(elements.eventForm.querySelectorAll('input[name="notificationTargetUserIds"]')).forEach((input) => {
     input.checked = state.currentUser ? input.value === state.currentUser.id : false;
@@ -642,6 +736,9 @@ function openEventModal(event = null) {
   elements.eventForm.elements.allDay.checked = Boolean(event.allDay);
   elements.notificationsEnabled.checked = Boolean(event.notifications?.enabled);
   elements.annoyMode.checked = Boolean(event.notifications?.annoyMode);
+  elements.annoyLevel.value = String(event.notifications?.annoyLevel || 5);
+  elements.aiReminderCopy.checked = Boolean(event.notifications?.aiGenerated);
+  elements.aiUseWeb.checked = Boolean(event.notifications?.aiUseWeb);
   elements.annoyInterval.value = String(event.notifications?.annoyIntervalMinutes || 10);
 
   Array.from(elements.eventForm.querySelectorAll('input[name="memberIds"]')).forEach((input) => {
@@ -695,8 +792,13 @@ function toggleNotificationFields() {
     input.disabled = !enabled;
   });
   elements.annoyMode.disabled = !enabled;
-  elements.annoyInterval.disabled = !enabled || !elements.annoyMode.checked;
-  elements.annoyIntervalWrap.hidden = !enabled || !elements.annoyMode.checked;
+  elements.annoyLevel.disabled = !enabled || !elements.annoyMode.checked;
+  elements.annoyLevelWrap.hidden = !enabled || !elements.annoyMode.checked;
+  elements.aiReminderCopy.disabled = !enabled;
+  elements.aiUseWeb.disabled = !enabled || !elements.aiReminderCopy.checked;
+  elements.aiUseWebWrap.hidden = !enabled || !elements.aiReminderCopy.checked;
+  elements.annoyInterval.disabled = true;
+  elements.annoyIntervalWrap.hidden = true;
 }
 
 async function handleEventSubmit(event) {
@@ -720,6 +822,9 @@ async function handleEventSubmit(event) {
     notificationTargetUserIds: formData.getAll("notificationTargetUserIds"),
     notificationOffsetsMinutes: formData.getAll("notificationOffsetsMinutes"),
     annoyMode: formData.get("annoyMode") === "on",
+    annoyLevel: formData.get("annoyLevel"),
+    aiGenerated: formData.get("aiGenerated") === "on",
+    aiUseWeb: formData.get("aiUseWeb") === "on",
     annoyIntervalMinutes: formData.get("annoyIntervalMinutes")
   };
 
@@ -747,7 +852,7 @@ async function handleEventSubmit(event) {
     return;
   }
 
-  if (payload.notificationsEnabled && payload.notificationOffsetsMinutes.length === 0) {
+  if (payload.notificationsEnabled && !payload.annoyMode && payload.notificationOffsetsMinutes.length === 0) {
     elements.eventFormError.textContent = "Choose at least one reminder time.";
     elements.eventFormError.hidden = false;
     return;
@@ -780,6 +885,9 @@ async function handleEventSubmit(event) {
       targetUserIds: payload.notificationTargetUserIds,
       offsetsMinutes: payload.notificationOffsetsMinutes.map((value) => Number(value)),
       annoyMode: payload.annoyMode,
+      annoyLevel: Number(payload.annoyLevel || 5),
+      aiGenerated: payload.aiGenerated,
+      aiUseWeb: payload.aiUseWeb,
       annoyIntervalMinutes: Number(payload.annoyIntervalMinutes || 10)
     },
     start: startDate.toISOString(),
@@ -886,6 +994,7 @@ function bindEvents() {
   elements.eventForm.elements.allDay.addEventListener("change", toggleTimeFields);
   elements.notificationsEnabled.addEventListener("change", toggleNotificationFields);
   elements.annoyMode.addEventListener("change", toggleNotificationFields);
+  elements.aiReminderCopy.addEventListener("change", toggleNotificationFields);
   elements.deleteEvent.addEventListener("click", async () => {
     try {
       await deleteCurrentEvent();
