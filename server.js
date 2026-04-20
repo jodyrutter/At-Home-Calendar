@@ -1,5 +1,6 @@
 import express from "express";
-import { copyFile, mkdir, readdir, rename, rm, stat, unlink } from "node:fs/promises";
+import compression from "compression";
+import { copyFile, mkdir, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -18,6 +19,13 @@ const DB_FILE_NAME = "store.json";
 const DATABASE_URL = String(process.env.DATABASE_URL || "").trim();
 const THUMBNAIL_DIR = path.join(DATA_DIR, "media-thumbs");
 const VIDEO_PROXY_DIR = path.join(DATA_DIR, "video-proxies");
+// Uploaded account portraits live inside public/ so the existing static
+// middleware serves them directly. Client uploads are resized to <=512px edge
+// and kept well under 1 MB each, but we still enforce an upload cap
+// server-side as a defense-in-depth check.
+const AVATARS_DIR = path.join(__dirname, "public", "avatars");
+const AVATAR_MAX_BYTES = 1_500_000; // 1.5 MB hard cap on the wire
+const AVATAR_ALLOWED_MIMES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const APP_TIMEZONE = process.env.APP_TIMEZONE || "America/Port-au-Prince";
 const HOUSEHOLD_NAME = process.env.HOUSEHOLD_NAME || "Hearthboard Household";
 const MEDIA_LIBRARY_ROOTS = process.env.MEDIA_LIBRARY_ROOTS || "";
@@ -160,6 +168,7 @@ function defaultData() {
       sessions: [],
       devices: [],
       notificationDismissals: [],
+      completedEvents: [],
       localAi: {
         allowed: true,
         updatedAt: null,
@@ -252,6 +261,7 @@ function normalizeUsername(value) {
 await mkdir(DATA_DIR, { recursive: true });
 await mkdir(THUMBNAIL_DIR, { recursive: true });
 await mkdir(VIDEO_PROXY_DIR, { recursive: true });
+await mkdir(AVATARS_DIR, { recursive: true });
 const db = await createPersistentStore({
   dataDir: DATA_DIR,
   fileName: DB_FILE_NAME,
@@ -266,6 +276,127 @@ const authSessions = new Map();
 const authRateLimitBuckets = new Map();
 let reminderDraftProcessingPromise = null;
 let reminderDraftKickScheduled = false;
+
+// ---- db write coalescer ---------------------------------------------------
+// The old behaviour was `await db.write()` on every mutation — a full-file
+// rewrite that dominates latency on hot paths like dismissing a reminder or
+// logging a media view. `requestDbWrite()` flips a dirty flag and debounces
+// the flush so a burst of writes collapses into one disk hit. Critical paths
+// that truly need durability before responding still call `db.write()` or
+// `flushDbWrite()` directly.
+//
+// We also wrap `db.write` itself with a promise chain so concurrent writes
+// from the coalescer and from direct-await callers are serialized — neither
+// the lowdb JSON adapter nor the Postgres adapter guarantee safe concurrent
+// writes, so we do it at the app level.
+const originalDbWrite = db.write.bind(db);
+let dbWriteChain = Promise.resolve();
+db.write = function serializedDbWrite() {
+  const previous = dbWriteChain;
+  dbWriteChain = (async () => {
+    try {
+      await previous;
+    } catch {
+      // A prior write's failure must not prevent later writes from running.
+    }
+    await originalDbWrite();
+  })();
+  return dbWriteChain;
+};
+
+const DB_WRITE_DEBOUNCE_MS = 200;
+const DB_WRITE_MAX_WAIT_MS = 1500;
+let dbWriteDirty = false;
+let dbWriteHandle = null;
+let dbWriteFirstDirtyAt = 0;
+let dbWriteInFlight = null;
+
+async function performDbWrite() {
+  // Another flush may have been requested while this one awaits disk — loop
+  // until we've drained the dirty flag so we never leave pending state.
+  while (dbWriteDirty) {
+    dbWriteDirty = false;
+    dbWriteFirstDirtyAt = 0;
+    try {
+      await db.write();
+    } catch (error) {
+      // Keep the dirty flag set so a later flush retries, but surface the
+      // failure so a fatal disk error isn't totally silent.
+      dbWriteDirty = true;
+      console.error("[db] deferred write failed:", error?.message || error);
+      break;
+    }
+  }
+}
+
+function kickDbWrite() {
+  if (dbWriteInFlight) {
+    // Already writing — dirty flag plus the while-loop in performDbWrite
+    // guarantees the new changes will be picked up before it resolves.
+    return dbWriteInFlight;
+  }
+  if (dbWriteHandle) {
+    clearTimeout(dbWriteHandle);
+    dbWriteHandle = null;
+  }
+  dbWriteInFlight = performDbWrite().finally(() => {
+    dbWriteInFlight = null;
+  });
+  return dbWriteInFlight;
+}
+
+function requestDbWrite() {
+  dbWriteDirty = true;
+  const now = Date.now();
+  if (!dbWriteFirstDirtyAt) {
+    dbWriteFirstDirtyAt = now;
+  }
+  // If the debouncer has been continuously deferred for longer than the max
+  // wait, force a flush now so a steady trickle of writes can't starve disk
+  // forever.
+  if (now - dbWriteFirstDirtyAt >= DB_WRITE_MAX_WAIT_MS) {
+    return kickDbWrite();
+  }
+  if (dbWriteHandle) {
+    clearTimeout(dbWriteHandle);
+  }
+  dbWriteHandle = setTimeout(() => {
+    dbWriteHandle = null;
+    kickDbWrite();
+  }, DB_WRITE_DEBOUNCE_MS);
+  return null;
+}
+
+async function flushDbWrite() {
+  if (dbWriteHandle) {
+    clearTimeout(dbWriteHandle);
+    dbWriteHandle = null;
+  }
+  if (dbWriteInFlight) {
+    await dbWriteInFlight;
+  }
+  if (dbWriteDirty) {
+    await kickDbWrite();
+  }
+}
+
+// Make sure buffered writes land on graceful shutdown (docker stop sends
+// SIGTERM; Ctrl+C sends SIGINT). Without this, a restart in the middle of the
+// debounce window could drop the last few mutations.
+let shuttingDown = false;
+async function gracefulShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  try {
+    await flushDbWrite();
+  } catch (error) {
+    console.error("[db] flush on shutdown failed:", error?.message || error);
+  } finally {
+    process.exit(signal === "SIGINT" ? 130 : 0);
+  }
+}
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 
 if (!Array.isArray(db.data.events)) {
   db.data.events = [];
@@ -370,12 +501,7 @@ for (const user of db.data.security.users) {
   user.email = String(user.email || "").trim();
   user.phone = String(user.phone || "").trim();
   user.passwordHash = user.passwordHash || null;
-  user.avatar = user.avatar && typeof user.avatar === "object"
-    ? {
-        libraryId: String(user.avatar.libraryId || "").trim(),
-        path: String(user.avatar.path || "").replaceAll("\\", "/").replace(/^\/+/, "")
-      }
-    : null;
+  user.avatar = normalizeStoredAvatar(user.avatar);
   user.permissionLevel = PERMISSION_LEVELS.includes(String(user.permissionLevel || "").trim().toLowerCase())
     ? String(user.permissionLevel || "").trim().toLowerCase()
     : user.role === "admin"
@@ -456,6 +582,18 @@ db.data.security.notificationDismissals = db.data.security.notificationDismissal
     dismissedAt: String(entry?.dismissedAt || "").trim() || new Date().toISOString()
   }))
   .filter((entry) => entry.id && entry.userId);
+
+if (!Array.isArray(db.data.security.completedEvents)) {
+  db.data.security.completedEvents = [];
+}
+
+db.data.security.completedEvents = db.data.security.completedEvents
+  .map((entry) => ({
+    eventId: String(entry?.eventId || "").trim(),
+    userId: String(entry?.userId || "").trim(),
+    completedAt: String(entry?.completedAt || "").trim() || new Date().toISOString()
+  }))
+  .filter((entry) => entry.eventId && entry.userId);
 
 for (const device of db.data.security.devices) {
   if (!device || typeof device !== "object") {
@@ -735,6 +873,16 @@ function notificationDismissals() {
   return db.data.security.notificationDismissals;
 }
 
+function completedEvents() {
+  return db.data.security.completedEvents;
+}
+
+function completedEventIdSet(userId) {
+  return new Set(completedEvents()
+    .filter((entry) => entry.userId === userId)
+    .map((entry) => entry.eventId));
+}
+
 function memberByUserId(userId) {
   return db.data.members.find((member) => member.userId === userId) || null;
 }
@@ -756,45 +904,81 @@ function passwordConfigured() {
   return Boolean(adminUserAccount()?.passwordHash);
 }
 
+function normalizeStoredAvatar(avatar) {
+  if (!avatar || typeof avatar !== "object") {
+    return null;
+  }
+  if (avatar.kind === "uploaded" && avatar.file) {
+    // Whitelist filename to prevent path traversal on read
+    const file = String(avatar.file).replace(/[^\w.\-]/g, "");
+    if (!file) return null;
+    return {
+      kind: "uploaded",
+      file,
+      updatedAt: String(avatar.updatedAt || "").trim() || null
+    };
+  }
+  const libraryId = String(avatar.libraryId || "").trim();
+  const normalizedPath = String(avatar.path || "").replaceAll("\\", "/").replace(/^\/+/, "");
+  if (libraryId && normalizedPath) {
+    return { libraryId, path: normalizedPath };
+  }
+  return null;
+}
+
 function userAvatarSummary(user, request = null) {
-  if (!user?.avatar?.libraryId || !user?.avatar?.path) {
+  const initial = prettifyUsername(user?.username).charAt(0).toUpperCase() || "H";
+  const fallback = { kind: "initial", initial };
+
+  const avatar = user?.avatar;
+  if (!avatar || typeof avatar !== "object") {
+    return fallback;
+  }
+
+  // New upload-based portraits live under public/avatars/<user-id>.jpg and
+  // carry a "kind": "uploaded" marker.
+  if (avatar.kind === "uploaded" && avatar.file) {
+    const safeName = String(avatar.file).replace(/[^\w.\-]/g, "");
+    if (!safeName) return fallback;
+    const baseUrl = `/avatars/${encodeURIComponent(safeName)}`;
+    const updatedAt = avatar.updatedAt || "";
+    // Cache-bust so a freshly re-uploaded portrait invalidates the browser
+    // cache without us having to disable caching on the public/avatars/ dir.
+    const version = updatedAt ? encodeURIComponent(updatedAt) : "";
+    const url = version ? `${baseUrl}?v=${version}` : baseUrl;
     return {
-      kind: "initial",
-      initial: prettifyUsername(user?.username).charAt(0).toUpperCase() || "H"
+      kind: "image",
+      initial,
+      imageUrl: url,
+      thumbnailUrl: url,
+      updatedAt,
+      source: "uploaded"
     };
   }
 
-  const library = getMediaLibrary(user.avatar.libraryId);
-  if (!library) {
+  // Legacy: avatar referenced a gallery file by {libraryId, path}. Still
+  // honored so nothing breaks for users who had one configured before.
+  if (avatar.libraryId && avatar.path) {
+    const library = getMediaLibrary(avatar.libraryId);
+    if (!library) return fallback;
+    if (request && !requestCanAccessMediaLibrary(request, library)) return fallback;
+
+    const resolvedPath = resolveMediaPath(library, avatar.path);
+    if (!resolvedPath || mediaTypeForExtension(path.extname(resolvedPath)) !== "image") {
+      return fallback;
+    }
     return {
-      kind: "initial",
-      initial: prettifyUsername(user?.username).charAt(0).toUpperCase() || "H"
+      kind: "image",
+      initial,
+      libraryId: library.id,
+      path: avatar.path,
+      thumbnailUrl: buildThumbnailUrl(library.id, avatar.path),
+      imageUrl: buildMediaUrl(library.id, avatar.path),
+      source: "gallery"
     };
   }
 
-  if (request && !requestCanAccessMediaLibrary(request, library)) {
-    return {
-      kind: "initial",
-      initial: prettifyUsername(user?.username).charAt(0).toUpperCase() || "H"
-    };
-  }
-
-  const resolvedPath = resolveMediaPath(library, user.avatar.path);
-  if (!resolvedPath || mediaTypeForExtension(path.extname(resolvedPath)) !== "image") {
-    return {
-      kind: "initial",
-      initial: prettifyUsername(user?.username).charAt(0).toUpperCase() || "H"
-    };
-  }
-
-  return {
-    kind: "image",
-    initial: prettifyUsername(user?.username).charAt(0).toUpperCase() || "H",
-    libraryId: library.id,
-    path: user.avatar.path,
-    thumbnailUrl: buildThumbnailUrl(library.id, user.avatar.path),
-    imageUrl: buildMediaUrl(library.id, user.avatar.path)
-  };
+  return fallback;
 }
 
 function userSummary(user, request = null) {
@@ -836,7 +1020,12 @@ function notificationFeedForUser(user) {
   }
 
   const dismissedIds = dismissedNotificationIdSet(user.id);
-  return upcomingReminderEntriesForUser(user)
+  const completedIds = completedEventIdSet(user.id);
+
+  // 1. Build per-reminder entries, skipping anything whose event the user
+  //    has already marked "Task finished".
+  const allEntries = upcomingReminderEntriesForUser(user)
+    .filter((reminder) => !completedIds.has(reminder.eventId))
     .map((reminder) => {
       const id = notificationFeedId(user, reminder);
       return {
@@ -857,6 +1046,41 @@ function notificationFeedForUser(user) {
         dismissed: dismissedIds.has(id)
       };
     })
+    .sort((left, right) => new Date(left.scheduledAt).getTime() - new Date(right.scheduledAt).getTime());
+
+  // 2. Collapse to one row per event: the earliest upcoming undismissed
+  //    reminder for each event. If every reminder for an event is dismissed,
+  //    keep the most recent one so the user still has something to act on.
+  const perEvent = new Map();
+  for (const entry of allEntries) {
+    const existing = perEvent.get(entry.eventId);
+    if (!existing) {
+      perEvent.set(entry.eventId, entry);
+      continue;
+    }
+    // Prefer the earliest undismissed entry; fall back to earliest dismissed.
+    const existingIsUndismissed = !existing.dismissed;
+    const entryIsUndismissed = !entry.dismissed;
+    if (existingIsUndismissed && !entryIsUndismissed) continue;
+    if (!existingIsUndismissed && entryIsUndismissed) {
+      perEvent.set(entry.eventId, entry);
+      continue;
+    }
+    // Both same status — keep the earlier scheduled one (allEntries is sorted).
+  }
+
+  // 3. Count suppressed siblings so the UI can say "and N more reminders
+  //    scheduled for this event" if it wants.
+  const siblingCounts = new Map();
+  for (const entry of allEntries) {
+    siblingCounts.set(entry.eventId, (siblingCounts.get(entry.eventId) || 0) + 1);
+  }
+
+  return Array.from(perEvent.values())
+    .map((entry) => ({
+      ...entry,
+      totalForEvent: siblingCounts.get(entry.eventId) || 1
+    }))
     .sort((left, right) => new Date(left.scheduledAt).getTime() - new Date(right.scheduledAt).getTime());
 }
 
@@ -1711,7 +1935,9 @@ async function trackDeviceRequest(request, response) {
       usernames: user ? [user.username] : []
     };
     devices().push(device);
-    await db.write();
+    // Device tracking runs on every request — debounce the write so a burst
+    // of navigations collapses into one disk hit.
+    requestDbWrite();
     return;
   }
 
@@ -1731,7 +1957,8 @@ async function trackDeviceRequest(request, response) {
   device.anonymousVisitCount = Math.max(0, Number.parseInt(String(device.anonymousVisitCount || "0"), 10) || 0) + (user ? 0 : 1);
   device.usernames = [...nextUsernames];
 
-  await db.write();
+  // Same rationale — every page load touches this path.
+  requestDbWrite();
 }
 
 function deviceIdentitySignature(device) {
@@ -3570,6 +3797,12 @@ function requestSatisfiesGuard(request, guard) {
   return requestCanAccessPage(request, guard.pageKey);
 }
 
+// Gzip every compressible text response (HTML, JS, CSS, JSON). Defaults skip
+// already-compressed media (images, video, zip, woff2), so thumbnails and
+// video proxies pass through untouched. threshold=1024 avoids wasting CPU on
+// tiny bodies where gzip overhead outweighs the savings.
+app.use(compression({ threshold: 1024 }));
+
 app.use(express.json({ limit: "1mb" }));
 app.use(async (request, response, next) => {
   try {
@@ -3820,6 +4053,128 @@ app.patch("/api/account/profile", async (request, response) => {
   });
 });
 
+// Direct portrait upload. The client already resizes and JPEG-encodes the
+// image client-side (max 512px edge, target <=1 MB), but we still validate
+// size + magic bytes before writing anything to disk.
+const avatarRawParser = express.raw({
+  type: (req) => {
+    const ct = String(req.headers["content-type"] || "").toLowerCase();
+    return ct.startsWith("image/") || ct === "application/octet-stream";
+  },
+  limit: AVATAR_MAX_BYTES
+});
+
+function detectImageKind(buffer) {
+  if (!buffer || buffer.length < 12) return null;
+  // JPEG: FF D8 FF
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return { mime: "image/jpeg", ext: "jpg" };
+  }
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (
+    buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47 &&
+    buffer[4] === 0x0d && buffer[5] === 0x0a && buffer[6] === 0x1a && buffer[7] === 0x0a
+  ) {
+    return { mime: "image/png", ext: "png" };
+  }
+  // WebP: "RIFF....WEBP"
+  if (
+    buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46 &&
+    buffer[8] === 0x57 && buffer[9] === 0x45 && buffer[10] === 0x42 && buffer[11] === 0x50
+  ) {
+    return { mime: "image/webp", ext: "webp" };
+  }
+  return null;
+}
+
+async function removeExistingAvatarFiles(userId) {
+  // Best-effort cleanup: delete any <userId>.* file from a previous upload so
+  // we don't accumulate orphans when someone switches file types.
+  try {
+    const entries = await readdir(AVATARS_DIR);
+    await Promise.all(
+      entries
+        .filter((name) => name.startsWith(`${userId}.`))
+        .map((name) => unlink(path.join(AVATARS_DIR, name)).catch(() => {}))
+    );
+  } catch {
+    // AVATARS_DIR was created at startup; if it's missing something else is wrong.
+  }
+}
+
+app.post("/api/account/avatar", avatarRawParser, async (request, response) => {
+  const user = authenticatedUser(request);
+  if (!user) {
+    return response.status(401).json({ error: "Sign in to update your portrait." });
+  }
+
+  const buffer = Buffer.isBuffer(request.body) ? request.body : null;
+  if (!buffer || !buffer.length) {
+    return response.status(400).json({ error: "No image was received." });
+  }
+  if (buffer.length > AVATAR_MAX_BYTES) {
+    return response.status(413).json({ error: "Portrait image is too large." });
+  }
+
+  const detected = detectImageKind(buffer);
+  if (!detected) {
+    return response.status(415).json({ error: "Upload a JPEG, PNG, or WebP image." });
+  }
+
+  // Guard against server misconfig where content-type is a lie — we trust the
+  // magic bytes, not the header. But if the header is present, make sure it
+  // at least points at an image type.
+  const headerType = String(request.headers["content-type"] || "").toLowerCase().split(";")[0].trim();
+  if (headerType && !headerType.startsWith("image/") && headerType !== "application/octet-stream") {
+    return response.status(415).json({ error: "Unsupported content type." });
+  }
+
+  const safeUserId = String(user.id).replace(/[^\w.\-]/g, "");
+  if (!safeUserId) {
+    return response.status(400).json({ error: "Account is not properly initialized." });
+  }
+
+  const filename = `${safeUserId}.${detected.ext}`;
+  const destination = path.join(AVATARS_DIR, filename);
+
+  // Path traversal defense-in-depth: resolved destination must stay inside
+  // AVATARS_DIR.
+  const resolvedAvatarsDir = path.resolve(AVATARS_DIR) + path.sep;
+  if (!path.resolve(destination).startsWith(resolvedAvatarsDir)) {
+    return response.status(400).json({ error: "Refusing to write outside the avatars directory." });
+  }
+
+  await removeExistingAvatarFiles(safeUserId);
+  await writeFile(destination, buffer);
+
+  const updatedAt = new Date().toISOString();
+  user.avatar = { kind: "uploaded", file: filename, updatedAt };
+  user.updatedAt = updatedAt;
+  await db.write();
+
+  return response.json({
+    ok: true,
+    user: userSummary(user, request)
+  });
+});
+
+app.delete("/api/account/avatar", async (request, response) => {
+  const user = authenticatedUser(request);
+  if (!user) {
+    return response.status(401).json({ error: "Sign in to update your portrait." });
+  }
+
+  await removeExistingAvatarFiles(String(user.id).replace(/[^\w.\-]/g, ""));
+  user.avatar = null;
+  user.updatedAt = new Date().toISOString();
+  await db.write();
+
+  return response.json({
+    ok: true,
+    user: userSummary(user, request)
+  });
+});
+
 app.patch("/api/account/password", async (request, response) => {
   const user = authenticatedUser(request);
   if (!user) {
@@ -3884,10 +4239,65 @@ app.post("/api/account/notifications/:notificationId/dismiss", async (request, r
       userId: user.id,
       dismissedAt: new Date().toISOString()
     });
-    await db.write();
+    requestDbWrite();
   }
 
   return response.json({ ok: true });
+});
+
+// Marks an entire event as "task finished" for this user — suppresses every
+// future reminder for that event and quiets the notification feed from now on.
+app.post("/api/account/notifications/event/:eventId/complete", async (request, response) => {
+  const user = authenticatedUser(request);
+  if (!user) {
+    return response.status(401).json({ error: "Sign in to mark reminders finished." });
+  }
+
+  const eventId = String(request.params.eventId || "").trim();
+  if (!eventId) {
+    return response.status(400).json({ error: "Choose a valid event to mark finished." });
+  }
+
+  // Confirm the user has at least one reminder for this event before letting
+  // them mark it complete — prevents blind writes for events they can't see.
+  const hasReminder = upcomingReminderEntriesForUser(user).some((reminder) => reminder.eventId === eventId);
+  if (!hasReminder) {
+    return response.status(404).json({ error: "That event no longer has reminders to finish." });
+  }
+
+  if (!completedEvents().some((entry) => entry.userId === user.id && entry.eventId === eventId)) {
+    completedEvents().push({
+      eventId,
+      userId: user.id,
+      completedAt: new Date().toISOString()
+    });
+    requestDbWrite();
+  }
+
+  return response.json({ ok: true, eventId });
+});
+
+// Un-marks an event as finished (lets reminders show up again). Useful if the
+// user taps "Task finished" by accident.
+app.delete("/api/account/notifications/event/:eventId/complete", async (request, response) => {
+  const user = authenticatedUser(request);
+  if (!user) {
+    return response.status(401).json({ error: "Sign in to manage your reminders." });
+  }
+
+  const eventId = String(request.params.eventId || "").trim();
+  if (!eventId) {
+    return response.status(400).json({ error: "Choose a valid event." });
+  }
+
+  const before = completedEvents().length;
+  db.data.security.completedEvents = completedEvents()
+    .filter((entry) => !(entry.userId === user.id && entry.eventId === eventId));
+  if (completedEvents().length !== before) {
+    requestDbWrite();
+  }
+
+  return response.json({ ok: true, eventId });
 });
 
 app.patch("/api/admin/visibility", async (request, response) => {
@@ -4034,10 +4444,17 @@ app.get("/api/mobile/reminders", (request, response) => {
     return response.status(401).json({ error: "Sign in to sync mobile reminders." });
   }
 
+  // Respect "Task finished" — if the user marked an event complete, the mobile
+  // bridge / service worker must stop firing pushes for it.
+  const completedIds = completedEventIdSet(user.id);
+  const reminders = upcomingReminderEntriesForUser(user).filter(
+    (reminder) => !completedIds.has(reminder.eventId)
+  );
+
   response.json({
     generatedAt: new Date().toISOString(),
     user: notificationTargetSummary(user),
-    reminders: upcomingReminderEntriesForUser(user)
+    reminders
   });
 });
 
@@ -4184,7 +4601,9 @@ app.post("/api/media/view", async (request, response) => {
   }
 
   const next = upsertMediaView(library.id, relativeMediaPath(library, resolvedPath));
-  await db.write();
+  // View counts are high-frequency but low-stakes — a debounced flush is fine,
+  // and the response already returns the fresh in-memory count either way.
+  requestDbWrite();
   return response.json({
     ok: true,
     viewCount: next.viewCount,

@@ -145,6 +145,51 @@ function paintSpark(ctx, spark, dark, time) {
   ctx.fill();
 }
 
+function makeShootingStar(width, height) {
+  // Enter from the upper right, streak toward the lower left.
+  const startX = width + rand(0, 120);
+  const startY = rand(-40, height * 0.35);
+  const angle = rand(Math.PI * 0.85, Math.PI * 1.05); // roughly leftward-down
+  const speed = rand(6, 10);
+  return {
+    x: startX,
+    y: startY,
+    vx: Math.cos(angle) * speed,
+    vy: Math.sin(angle) * speed * 0.6,
+    age: 0,
+    life: rand(1.1, 1.8),
+    length: rand(160, 280)
+  };
+}
+
+function paintShootingStar(ctx, star, dark) {
+  const fade = Math.max(0, Math.min(1, 1 - star.age / star.life));
+  const tailX = star.x - (star.vx / Math.hypot(star.vx, star.vy)) * star.length;
+  const tailY = star.y - (star.vy / Math.hypot(star.vx, star.vy)) * star.length;
+  const gradient = ctx.createLinearGradient(star.x, star.y, tailX, tailY);
+  const headColor = dark ? "rgba(255, 240, 210, " : "rgba(255, 200, 140, ";
+  gradient.addColorStop(0, `${headColor}${0.85 * fade})`);
+  gradient.addColorStop(1, `${headColor}0)`);
+  ctx.save();
+  ctx.strokeStyle = gradient;
+  ctx.lineWidth = 2.2;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(star.x, star.y);
+  ctx.lineTo(tailX, tailY);
+  ctx.stroke();
+
+  // Little halo at the head
+  const halo = ctx.createRadialGradient(star.x, star.y, 0, star.x, star.y, 6);
+  halo.addColorStop(0, `rgba(255, 225, 170, ${0.85 * fade})`);
+  halo.addColorStop(1, "rgba(255, 225, 170, 0)");
+  ctx.fillStyle = halo;
+  ctx.beginPath();
+  ctx.arc(star.x, star.y, 6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
 function startAmbient() {
   const container = ensureContainer();
   const canvas = container.querySelector(".hearthboard-ambient-canvas");
@@ -155,6 +200,8 @@ function startAmbient() {
   let height = window.innerHeight;
   let embers = [];
   let sparks = [];
+  let shootingStars = [];
+  let nextShootingStarAt = performance.now() + rand(12000, 24000);
   let pointer = { x: width / 2, y: height + 80, active: false, last: 0 };
   let lastFrame = performance.now();
   let running = true;
@@ -187,6 +234,22 @@ function startAmbient() {
 
     for (const spark of sparks) {
       paintSpark(ctx, spark, dark, now);
+    }
+
+    // Launch a shooting star at a random interval, then run any in flight.
+    if (now >= nextShootingStarAt && shootingStars.length < 2) {
+      shootingStars.push(makeShootingStar(width, height));
+      nextShootingStarAt = now + rand(14000, 32000);
+    }
+    for (let i = shootingStars.length - 1; i >= 0; i -= 1) {
+      const star = shootingStars[i];
+      star.age += delta / 1000;
+      star.x += star.vx * (delta / 16);
+      star.y += star.vy * (delta / 16);
+      paintShootingStar(ctx, star, dark);
+      if (star.age > star.life || star.x < -200 || star.y > height + 100) {
+        shootingStars.splice(i, 1);
+      }
     }
 
     for (const ember of embers) {
@@ -261,6 +324,29 @@ function startAmbient() {
     }
   });
 
+  // Pause the ambient canvas while the page is actively scrolling, resume
+  // shortly after scrolling stops. Scrolling is when backdrop-filter +
+  // gradient repaints compete for the compositor; silencing the canvas
+  // frees the GPU to keep scroll smooth. Animations are fully intact when
+  // the page is at rest — which is when users actually see them.
+  let scrollResumeHandle = 0;
+  const SCROLL_RESUME_DELAY_MS = 220;
+  const onScroll = () => {
+    if (running) {
+      pause();
+    }
+    if (scrollResumeHandle) {
+      clearTimeout(scrollResumeHandle);
+    }
+    scrollResumeHandle = window.setTimeout(() => {
+      scrollResumeHandle = 0;
+      if (!document.hidden) {
+        resume();
+      }
+    }, SCROLL_RESUME_DELAY_MS);
+  };
+  window.addEventListener("scroll", onScroll, { passive: true, capture: true });
+
   window.addEventListener("resize", resize);
   window.addEventListener("pointermove", handlePointer, { passive: true });
   window.addEventListener("pointerleave", handlePointerLeave);
@@ -270,24 +356,30 @@ function startAmbient() {
   rafHandle = window.requestAnimationFrame(step);
 }
 
-function bindThemeReactiveTilt() {
+function bindThemeReactiveGlow() {
   const cards = document.querySelectorAll(".card");
   if (!cards.length) {
     return;
   }
 
-  // Subtle parallax on cards that follows the cursor.
-  const onMove = (event) => {
+  // Only update the radial glow under the cursor — no tilt. Also throttled
+  // via rAF so low-end laptops don't drop frames on every pointermove.
+  let latestEvent = null;
+  let pendingFrame = false;
+
+  const applyGlow = () => {
+    pendingFrame = false;
+    if (!latestEvent) return;
+    const event = latestEvent;
+
     for (const card of cards) {
       const rect = card.getBoundingClientRect();
       if (
-        event.clientX < rect.left - 80 ||
-        event.clientX > rect.right + 80 ||
-        event.clientY < rect.top - 80 ||
-        event.clientY > rect.bottom + 80
+        event.clientX < rect.left - 40 ||
+        event.clientX > rect.right + 40 ||
+        event.clientY < rect.top - 40 ||
+        event.clientY > rect.bottom + 40
       ) {
-        card.style.removeProperty("--card-tilt-x");
-        card.style.removeProperty("--card-tilt-y");
         card.style.removeProperty("--card-glow-x");
         card.style.removeProperty("--card-glow-y");
         continue;
@@ -295,10 +387,16 @@ function bindThemeReactiveTilt() {
 
       const x = (event.clientX - rect.left) / rect.width;
       const y = (event.clientY - rect.top) / rect.height;
-      card.style.setProperty("--card-tilt-x", `${(0.5 - y) * 4}deg`);
-      card.style.setProperty("--card-tilt-y", `${(x - 0.5) * 4}deg`);
       card.style.setProperty("--card-glow-x", `${x * 100}%`);
       card.style.setProperty("--card-glow-y", `${y * 100}%`);
+    }
+  };
+
+  const onMove = (event) => {
+    latestEvent = event;
+    if (!pendingFrame) {
+      pendingFrame = true;
+      window.requestAnimationFrame(applyGlow);
     }
   };
 
@@ -338,11 +436,77 @@ function watchThemeChanges() {
   observer.observe(root, { attributes: true, attributeFilter: ["data-theme"] });
 }
 
+function detectPerformanceMode() {
+  const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const lowMemory = Number.isFinite(navigator.deviceMemory) && navigator.deviceMemory <= 4;
+  const lowCpu = Number.isFinite(navigator.hardwareConcurrency) && navigator.hardwareConcurrency <= 4;
+  const liteMode = reduceMotion || lowMemory || lowCpu;
+  document.body.classList.toggle("is-ambient-lite", liteMode);
+  document.body.classList.toggle("is-motion-reduced", reduceMotion);
+  return { liteMode, reduceMotion };
+}
+
+function bindDialogBodyLock() {
+  // Freeze page scroll and hide the page scrollbar whenever any <dialog.modal>
+  // is open. This is the belt-and-suspenders fallback for browsers that lack
+  // :has() — the CSS rule `html:has(dialog[open]){overflow:hidden}` handles
+  // modern browsers; this keeps the experience consistent everywhere.
+  const dialogs = document.querySelectorAll("dialog.modal");
+  if (!dialogs.length) return;
+
+  const refresh = () => {
+    const anyOpen = Array.from(document.querySelectorAll("dialog.modal"))
+      .some((d) => d.hasAttribute("open"));
+    document.body.classList.toggle("has-modal-open", anyOpen);
+  };
+
+  const observer = new MutationObserver(refresh);
+  for (const dialog of dialogs) {
+    observer.observe(dialog, { attributes: true, attributeFilter: ["open"] });
+  }
+  refresh();
+}
+
+function bindViewerQuickClose() {
+  // Clicking outside the image/video (on the dim backdrop) or on the media
+  // itself closes the viewer, which feels more like a native lightbox.
+  const viewer = document.querySelector("#viewer-modal");
+  if (!viewer) return;
+
+  // Close on clicks to the backdrop — i.e. clicks on the <dialog> itself
+  // rather than on its form/content.
+  viewer.addEventListener("click", (event) => {
+    if (event.target === viewer) {
+      viewer.close();
+    }
+  });
+
+  // Close on clicking the image itself (tap to dismiss on touch, too).
+  viewer.addEventListener("click", (event) => {
+    const target = event.target;
+    if (target && target.tagName === "IMG" && target.closest("#viewer-body")) {
+      viewer.close();
+    }
+  });
+}
+
 function start() {
   watchThemeChanges();
-  startAmbient();
-  bindThemeReactiveTilt();
-  revealOnScroll();
+  const { liteMode, reduceMotion } = detectPerformanceMode();
+
+  if (!liteMode) {
+    startAmbient();
+  }
+  if (!reduceMotion) {
+    bindThemeReactiveGlow();
+    revealOnScroll();
+  } else {
+    // Make cards visible immediately without the rise animation.
+    document.querySelectorAll(".card, .calendar-cell, .summary-card")
+      .forEach((node) => node.classList.add("is-revealed"));
+  }
+  bindDialogBodyLock();
+  bindViewerQuickClose();
 }
 
 if (document.readyState === "loading") {

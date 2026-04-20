@@ -28,7 +28,8 @@ const elements = {
   annoyMode: document.querySelector("#event-annoy-mode"),
   annoyLevelWrap: document.querySelector("#event-annoy-level-wrap"),
   annoyLevel: document.querySelector("#event-annoy-level"),
-  annoyLevelMeter: document.querySelector("#event-annoy-level-meter"),
+  annoyLevelPicker: document.querySelector("#event-annoy-level-picker"),
+  annoyLevelDisplay: document.querySelector("#event-annoy-level-display"),
   aiReminderCopy: document.querySelector("#event-ai-reminders"),
   aiUseWeb: document.querySelector("#event-ai-use-web"),
   aiUseWebWrap: document.querySelector("#event-ai-use-web-wrap"),
@@ -118,7 +119,7 @@ function renderNotificationCheckboxes() {
   elements.notificationTargetCheckboxes.innerHTML = "";
   elements.notificationOffsetCheckboxes.innerHTML = "";
   elements.annoyInterval.innerHTML = "";
-  elements.annoyLevel.innerHTML = "";
+  renderAnnoyLevelPicker();
 
   state.notificationTargets.forEach((target) => {
     const label = document.createElement("label");
@@ -145,12 +146,59 @@ function renderNotificationCheckboxes() {
     elements.annoyInterval.append(element);
   });
 
-  state.annoyLevelOptions.forEach((option) => {
-    const element = document.createElement("option");
-    element.value = String(option.level);
-    element.textContent = option.label;
-    elements.annoyLevel.append(element);
+}
+
+function renderAnnoyLevelPicker() {
+  if (!elements.annoyLevelPicker) {
+    return;
+  }
+  const existing = Number(elements.annoyLevel?.value || 5);
+  elements.annoyLevelPicker.innerHTML = "";
+  const options = state.annoyLevelOptions.length
+    ? state.annoyLevelOptions
+    : Array.from({ length: 10 }, (_, i) => ({ level: i + 1, label: `Level ${i + 1}` }));
+
+  options.forEach((option) => {
+    const pill = document.createElement("button");
+    pill.type = "button";
+    pill.className = "annoy-level-pill";
+    pill.dataset.level = String(option.level);
+    pill.setAttribute("role", "radio");
+    pill.setAttribute("aria-checked", String(option.level === existing));
+    pill.setAttribute("aria-label", option.label || `Level ${option.level}`);
+    pill.textContent = String(option.level);
+    pill.addEventListener("click", () => setAnnoyLevel(option.level, { focus: true }));
+    elements.annoyLevelPicker.append(pill);
   });
+
+  setAnnoyLevel(existing, { focus: false });
+}
+
+function setAnnoyLevel(level, { focus = false } = {}) {
+  const numeric = Math.max(1, Math.min(10, Number(level) || 5));
+  if (elements.annoyLevel) {
+    elements.annoyLevel.value = String(numeric);
+  }
+  if (elements.annoyLevelDisplay) {
+    elements.annoyLevelDisplay.textContent = String(numeric);
+  }
+  if (elements.annoyLevelPicker) {
+    Array.from(elements.annoyLevelPicker.querySelectorAll(".annoy-level-pill")).forEach((pill) => {
+      const pillLevel = Number(pill.dataset.level);
+      const active = pillLevel === numeric;
+      pill.setAttribute("aria-checked", String(active));
+      pill.dataset.active = String(active);
+      pill.dataset.scale = pillLevel <= numeric ? "on" : "off";
+    });
+  }
+  if (elements.annoyLevelWrap?.dataset) {
+    elements.annoyLevelWrap.dataset.level = String(numeric);
+  }
+  renderAnnoyLevelIndicator();
+  if (focus && elements.annoyLevelPicker) {
+    const target = elements.annoyLevelPicker.querySelector(`[data-level="${numeric}"]`);
+    target?.focus({ preventScroll: true });
+  }
 }
 
 function toggleTimeFields() {
@@ -166,13 +214,17 @@ function toggleNotificationFields() {
     input.disabled = !enabled;
   });
   elements.annoyMode.disabled = !enabled;
-  // Annoyance level stays editable any time notifications are on. Previously
-  // this field was disabled whenever annoy-mode was unchecked, which meant the
-  // browser skipped it at submit time and the server fell back to 5 forever.
-  elements.annoyLevel.disabled = !enabled;
-  elements.annoyLevelWrap.hidden = !enabled;
-  if (elements.annoyLevelWrap.dataset) {
+  // Annoyance level stays editable any time notifications are on. We hide the
+  // field via a data-hidden attribute + CSS instead of the HTML `hidden`
+  // attribute, because adjacent CSS display rules were overriding `hidden`.
+  if (elements.annoyLevelWrap) {
+    elements.annoyLevelWrap.dataset.hidden = enabled ? "false" : "true";
     elements.annoyLevelWrap.dataset.annoyOn = elements.annoyMode.checked ? "1" : "0";
+  }
+  if (elements.annoyLevelPicker) {
+    Array.from(elements.annoyLevelPicker.querySelectorAll(".annoy-level-pill")).forEach((pill) => {
+      pill.disabled = !enabled;
+    });
   }
   elements.aiReminderCopy.disabled = !enabled;
   elements.aiUseWeb.disabled = !enabled || !elements.aiReminderCopy.checked;
@@ -187,11 +239,9 @@ function renderAnnoyLevelIndicator() {
   }
 
   const level = Math.max(1, Math.min(10, Number(elements.annoyLevel.value || 5)));
-  if (elements.annoyLevelWrap?.dataset) {
+  if (elements.annoyLevelWrap) {
     elements.annoyLevelWrap.dataset.level = String(level);
-  }
-  if (elements.annoyLevelMeter) {
-    elements.annoyLevelMeter.style.setProperty("--annoy-level", String(level));
+    elements.annoyLevelWrap.style.setProperty("--annoy-level", String(level));
   }
 }
 
@@ -215,9 +265,8 @@ function resetForm(dateValue = state.selectedDate) {
   elements.form.elements.endDate.value = formatDateInput(end);
   elements.form.elements.startTime.value = formatTimeInput(start);
   elements.form.elements.endTime.value = formatTimeInput(end);
-  elements.annoyLevel.value = "5";
+  setAnnoyLevel(5);
   elements.annoyInterval.value = "10";
-  renderAnnoyLevelIndicator();
 
   Array.from(elements.form.querySelectorAll('input[name="memberIds"]')).forEach((input) => {
     input.checked = false;
@@ -256,7 +305,7 @@ function populateForm(eventItem) {
   elements.form.elements.allDay.checked = Boolean(eventItem.allDay);
   elements.notificationsEnabled.checked = Boolean(eventItem.notifications?.enabled);
   elements.annoyMode.checked = Boolean(eventItem.notifications?.annoyMode);
-  elements.annoyLevel.value = String(eventItem.notifications?.annoyLevel || 5);
+  setAnnoyLevel(eventItem.notifications?.annoyLevel || 5);
   elements.aiReminderCopy.checked = Boolean(eventItem.notifications?.aiGenerated);
   elements.aiUseWeb.checked = Boolean(eventItem.notifications?.aiUseWeb);
   elements.annoyInterval.value = String(eventItem.notifications?.annoyIntervalMinutes || 10);
@@ -273,7 +322,6 @@ function populateForm(eventItem) {
 
   toggleTimeFields();
   toggleNotificationFields();
-  renderAnnoyLevelIndicator();
 }
 
 async function loadStudio() {
@@ -446,9 +494,25 @@ elements.form.elements.allDay.addEventListener("change", toggleTimeFields);
 elements.notificationsEnabled.addEventListener("change", toggleNotificationFields);
 elements.annoyMode.addEventListener("change", toggleNotificationFields);
 elements.aiReminderCopy.addEventListener("change", toggleNotificationFields);
-if (elements.annoyLevel) {
-  elements.annoyLevel.addEventListener("change", renderAnnoyLevelIndicator);
-  elements.annoyLevel.addEventListener("input", renderAnnoyLevelIndicator);
+// Keyboard nav for the pill radiogroup (arrows jump between levels).
+if (elements.annoyLevelPicker) {
+  elements.annoyLevelPicker.addEventListener("keydown", (event) => {
+    const current = Number(elements.annoyLevel?.value || 5);
+    let next = null;
+    if (event.key === "ArrowRight" || event.key === "ArrowUp") {
+      next = Math.min(10, current + 1);
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
+      next = Math.max(1, current - 1);
+    } else if (event.key === "Home") {
+      next = 1;
+    } else if (event.key === "End") {
+      next = 10;
+    }
+    if (next !== null) {
+      event.preventDefault();
+      setAnnoyLevel(next, { focus: true });
+    }
+  });
 }
 elements.deleteEvent.addEventListener("click", handleDelete);
 

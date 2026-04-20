@@ -69,8 +69,33 @@
         </div>
       </header>
 
-      <main class="account-layout">
-        <section class="card account-panel">
+      <main class="account-layout account-layout-v2">
+        <section class="card account-panel account-panel-portrait">
+          <div class="panel-header tight">
+            <div>
+              <p class="meta-label">Identity</p>
+              <h2>Portrait</h2>
+            </div>
+          </div>
+          <div class="portrait-uploader">
+            <div id="avatar-preview" class="account-avatar-preview portrait-preview">
+              <span id="avatar-preview-fallback">H</span>
+              <img id="avatar-preview-image" alt="" hidden />
+              <span class="portrait-preview-ring" aria-hidden="true"></span>
+            </div>
+            <p class="muted portrait-caption">Upload any image. It's automatically cropped, resized, and kept under 1&nbsp;MB.</p>
+            <input id="avatar-file-input" type="file" accept="image/*" hidden />
+            <div class="portrait-actions">
+              <button id="avatar-upload" class="button button-primary" type="button">Choose image</button>
+              <button id="avatar-clear" class="button button-secondary" type="button">Use initial</button>
+            </div>
+            <p id="avatar-status" class="muted portrait-status" hidden></p>
+            <p id="avatar-error" class="form-error" hidden></p>
+            <p id="avatar-success" class="form-success" hidden></p>
+          </div>
+        </section>
+
+        <section class="card account-panel account-panel-profile">
           <div class="panel-header tight">
             <div>
               <p class="meta-label">Profile</p>
@@ -95,43 +120,7 @@
           </form>
         </section>
 
-        <section class="card account-panel">
-          <div class="panel-header tight">
-            <div>
-              <p class="meta-label">Identity</p>
-              <h2>Account button portrait</h2>
-            </div>
-          </div>
-          <div class="avatar-picker-layout">
-            <div class="avatar-preview-shell">
-              <div id="avatar-preview" class="account-avatar-preview">
-                <span id="avatar-preview-fallback">H</span>
-                <img id="avatar-preview-image" alt="" hidden />
-              </div>
-              <p class="muted">Pick any image from a gallery you can already see, or fall back to your initial.</p>
-              <div class="avatar-picker-actions">
-                <button id="avatar-clear" class="button button-secondary" type="button">Use initial</button>
-                <button id="avatar-save" class="button button-primary" type="button">Save portrait</button>
-              </div>
-              <p id="avatar-error" class="form-error" hidden></p>
-              <p id="avatar-success" class="form-success" hidden></p>
-            </div>
-
-            <div class="avatar-browser">
-              <div class="avatar-browser-head">
-                <div>
-                  <p class="meta-label">Accessible galleries</p>
-                  <h3>Choose a source</h3>
-                </div>
-                <div id="avatar-library-tabs" class="member-filters"></div>
-              </div>
-              <div id="avatar-folder-list" class="breadcrumbs avatar-folder-list"></div>
-              <div id="avatar-image-grid" class="avatar-image-grid"></div>
-            </div>
-          </div>
-        </section>
-
-        <section class="card account-panel">
+        <section class="card account-panel account-panel-password">
           <div class="panel-header tight">
             <div>
               <p class="meta-label">Security</p>
@@ -160,7 +149,7 @@
           </form>
         </section>
 
-        <section id="admin-panel" class="card account-panel" hidden>
+        <section id="admin-panel" class="card account-panel account-panel-admin" hidden>
           <div class="panel-header tight">
             <div>
               <p class="meta-label">Admin control panel</p>

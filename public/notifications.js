@@ -58,6 +58,10 @@ function reminderCard(notification) {
   const article = document.createElement("article");
   article.className = "notification-card";
   article.dataset.dismissed = String(Boolean(notification.dismissed));
+  const siblingCount = Math.max(0, Number(notification.totalForEvent || 1) - 1);
+  const siblingBadge = siblingCount > 0
+    ? `<span class="notification-pill notification-pill-muted">+${siblingCount} more reminder${siblingCount === 1 ? "" : "s"} for this event</span>`
+    : "";
   article.innerHTML = `
     <div class="notification-card-topline">
       <div>
@@ -68,13 +72,15 @@ function reminderCard(notification) {
     </div>
     <p class="notification-body">${notification.body}</p>
     <p class="event-card-meta">${notification.eventTitle}${notification.location ? ` | ${notification.location}` : ""}${notification.aiGenerated ? " | Jody AI written" : ""}</p>
+    ${siblingBadge}
     <div class="notification-actions">
       <a class="button button-secondary" href="${notification.url}">Open event</a>
-      ${notification.dismissed ? "" : '<button class="button button-primary" type="button">Dismiss</button>'}
+      ${notification.dismissed ? "" : `<button class="button button-secondary" type="button" data-action="dismiss">Dismiss this one</button>`}
+      ${notification.dismissed ? "" : `<button class="button button-primary" type="button" data-action="complete">Task finished</button>`}
     </div>
   `;
 
-  const dismissButton = article.querySelector("button");
+  const dismissButton = article.querySelector('button[data-action="dismiss"]');
   if (dismissButton) {
     dismissButton.addEventListener("click", async () => {
       dismissButton.disabled = true;
@@ -85,6 +91,23 @@ function reminderCard(notification) {
         elements.error.hidden = false;
         elements.error.textContent = error.message;
         dismissButton.disabled = false;
+      }
+    });
+  }
+
+  const completeButton = article.querySelector('button[data-action="complete"]');
+  if (completeButton) {
+    completeButton.addEventListener("click", async () => {
+      completeButton.disabled = true;
+      if (dismissButton) dismissButton.disabled = true;
+      try {
+        await api(`/api/account/notifications/event/${encodeURIComponent(notification.eventId)}/complete`, { method: "POST" });
+        await loadNotifications();
+      } catch (error) {
+        elements.error.hidden = false;
+        elements.error.textContent = error.message;
+        completeButton.disabled = false;
+        if (dismissButton) dismissButton.disabled = false;
       }
     });
   }

@@ -166,19 +166,29 @@
                     <input id="event-annoy-mode" name="annoyMode" type="checkbox" />
                     Keep bugging them until the event starts
                   </label>
-                  <label id="event-annoy-level-wrap" class="annoy-level-field" hidden>
-                    <span class="annoy-level-label">
-                      Annoyance level
-                      <span class="annoy-level-hint">1 = soft nudge, 10 = chaos</span>
-                    </span>
-                    <select id="event-annoy-level" name="annoyLevel"></select>
-                    <span id="event-annoy-level-meter" class="annoy-level-meter" aria-hidden="true">
-                      <span class="annoy-level-meter-fill"></span>
-                      <span class="annoy-level-meter-ticks">
-                        <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+                  <div id="event-annoy-level-wrap" class="annoy-level-field" data-hidden="true">
+                    <div class="annoy-level-header">
+                      <span class="annoy-level-title">Annoyance level</span>
+                      <span class="annoy-level-value">
+                        <span id="event-annoy-level-display">5</span>
+                        <span class="annoy-level-value-unit">/ 10</span>
                       </span>
-                    </span>
-                  </label>
+                    </div>
+                    <div
+                      id="event-annoy-level-picker"
+                      class="annoy-level-picker"
+                      role="radiogroup"
+                      aria-label="Annoyance level"
+                    ></div>
+                    <div class="annoy-level-meter" aria-hidden="true">
+                      <div class="annoy-level-meter-fill"></div>
+                      <div class="annoy-level-meter-ticks">
+                        <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+                      </div>
+                    </div>
+                    <p class="annoy-level-hint">1 = soft nudge, 10 = pure chaos</p>
+                    <input id="event-annoy-level" name="annoyLevel" type="hidden" value="5" />
+                  </div>
                   <label class="checkbox-field">
                     <input id="event-ai-reminders" name="aiGenerated" type="checkbox" />
                     Let Jody AI write the notification messages

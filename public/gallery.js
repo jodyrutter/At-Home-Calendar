@@ -418,6 +418,48 @@ function renderMediaGrid() {
   });
 }
 
+// Builds a Google-style page list: [1, "...", 4, 5, 6, 7, 8, "...", 42].
+// Always anchors the first and last page, with a window of `around` pages on
+// either side of the current page. Ellipses are returned as the string "...".
+function computePaginationWindow(currentPage, totalPages, around = 2) {
+  if (totalPages <= 1) return [1];
+
+  const pages = new Set();
+  pages.add(1);
+  pages.add(totalPages);
+
+  const start = Math.max(2, currentPage - around);
+  const end = Math.min(totalPages - 1, currentPage + around);
+  for (let page = start; page <= end; page++) {
+    pages.add(page);
+  }
+
+  const sorted = [...pages].sort((a, b) => a - b);
+  const result = [];
+  for (let i = 0; i < sorted.length; i++) {
+    const page = sorted[i];
+    if (i > 0 && page - sorted[i - 1] > 1) {
+      result.push("...");
+    }
+    result.push(page);
+  }
+  return result;
+}
+
+function navigateToPage(page) {
+  loadPage(page)
+    .then(() => {
+      // Keep the user anchored near the top of the grid after a page change so
+      // they aren't stranded mid-scroll when the content swaps.
+      if (elements.mediaGrid && typeof elements.mediaGrid.scrollIntoView === "function") {
+        elements.mediaGrid.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    })
+    .catch((error) => {
+      elements.searchStatus.textContent = error.message;
+    });
+}
+
 function renderPagination() {
   elements.pagination.innerHTML = "";
 
@@ -432,32 +474,60 @@ function renderPagination() {
   status.className = "gallery-pagination-status";
   status.textContent = `Page ${state.currentPage} of ${state.totalPages}`;
 
-  const controls = document.createElement("div");
+  const controls = document.createElement("nav");
   controls.className = "gallery-pagination-controls";
+  controls.setAttribute("role", "navigation");
+  controls.setAttribute("aria-label", "Gallery pages");
 
   const previousButton = document.createElement("button");
   previousButton.type = "button";
-  previousButton.className = "button button-secondary pagination-button";
+  previousButton.className = "button button-secondary pagination-button pagination-step";
   previousButton.textContent = "Previous";
+  previousButton.setAttribute("aria-label", "Previous page");
   previousButton.disabled = !state.hasPreviousPage;
-  previousButton.addEventListener("click", () => {
-    loadPage(state.currentPage - 1).catch((error) => {
-      elements.searchStatus.textContent = error.message;
+  previousButton.addEventListener("click", () => navigateToPage(state.currentPage - 1));
+  controls.append(previousButton);
+
+  // Only show numbered buttons once there's more than one page — otherwise
+  // we'd just show a lone "1" which looks broken.
+  if (state.totalPages > 1) {
+    const pageList = computePaginationWindow(state.currentPage, state.totalPages);
+    pageList.forEach((entry) => {
+      if (entry === "...") {
+        const gap = document.createElement("span");
+        gap.className = "pagination-gap";
+        gap.setAttribute("aria-hidden", "true");
+        gap.textContent = "...";
+        controls.append(gap);
+        return;
+      }
+
+      const pageButton = document.createElement("button");
+      pageButton.type = "button";
+      pageButton.className = "pagination-number";
+      pageButton.textContent = String(entry);
+      pageButton.setAttribute("aria-label", `Go to page ${entry}`);
+      const isCurrent = entry === state.currentPage;
+      pageButton.dataset.current = String(isCurrent);
+      if (isCurrent) {
+        pageButton.setAttribute("aria-current", "page");
+        pageButton.disabled = true;
+      } else {
+        pageButton.addEventListener("click", () => navigateToPage(entry));
+      }
+      controls.append(pageButton);
     });
-  });
+  }
 
   const nextButton = document.createElement("button");
   nextButton.type = "button";
-  nextButton.className = "button button-secondary pagination-button";
+  nextButton.className = "button button-secondary pagination-button pagination-step";
   nextButton.textContent = "Next";
+  nextButton.setAttribute("aria-label", "Next page");
   nextButton.disabled = !state.hasNextPage;
-  nextButton.addEventListener("click", () => {
-    loadPage(state.currentPage + 1).catch((error) => {
-      elements.searchStatus.textContent = error.message;
-    });
-  });
+  nextButton.addEventListener("click", () => navigateToPage(state.currentPage + 1));
+  controls.append(nextButton);
 
-  controls.append(previousButton, nextButton);
   wrapper.append(status, controls);
   elements.pagination.append(wrapper);
 }

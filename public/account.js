@@ -14,13 +14,23 @@ const PERMISSION_LABELS = {
 const state = {
   account: null,
   activeAdminTab: "visibility",
+  // Legacy gallery-picker state kept around so any residual references don't
+  // explode. The new flow is a direct upload into public/avatars/.
   avatarLibraries: [],
   avatarLibraryId: "",
   avatarPath: "",
   avatarCurrentPath: "",
   avatarFolders: [],
-  avatarImages: []
+  avatarImages: [],
+  avatarUploading: false
 };
+
+// Maximum dimension the client-side resize pass shrinks portraits down to
+// before we send them to the server. 512 px is plenty for avatar circles and
+// reliably keeps JPEG-0.85 output well under 1 MB.
+const PORTRAIT_MAX_EDGE = 512;
+const PORTRAIT_JPEG_QUALITY = 0.85;
+const PORTRAIT_HARD_LIMIT_BYTES = 1_000_000; // 1 MB target
 
 const elements = {
   heading: document.querySelector("#account-heading"),
@@ -40,12 +50,11 @@ const elements = {
   avatarPreviewFallback: document.querySelector("#avatar-preview-fallback"),
   avatarPreviewImage: document.querySelector("#avatar-preview-image"),
   avatarClear: document.querySelector("#avatar-clear"),
-  avatarSave: document.querySelector("#avatar-save"),
+  avatarUpload: document.querySelector("#avatar-upload"),
+  avatarFileInput: document.querySelector("#avatar-file-input"),
+  avatarStatus: document.querySelector("#avatar-status"),
   avatarError: document.querySelector("#avatar-error"),
   avatarSuccess: document.querySelector("#avatar-success"),
-  avatarLibraryTabs: document.querySelector("#avatar-library-tabs"),
-  avatarFolderList: document.querySelector("#avatar-folder-list"),
-  avatarImageGrid: document.querySelector("#avatar-image-grid"),
   passwordForm: document.querySelector("#password-form"),
   passwordError: document.querySelector("#password-error"),
   passwordSuccess: document.querySelector("#password-success"),
@@ -118,12 +127,16 @@ function stagedAvatar() {
 }
 
 function renderAvatarPreview(avatar = null) {
-  const selected = avatar || stagedAvatar() || state.account?.user?.avatar || null;
+  const selected = avatar || state.account?.user?.avatar || null;
   elements.avatarPreviewFallback.textContent = avatarInitial();
 
   if (selected?.kind === "image" && (selected.thumbnailUrl || selected.imageUrl)) {
     elements.avatarPreviewImage.hidden = false;
-    elements.avatarPreviewImage.src = selected.thumbnailUrl || selected.imageUrl;
+    // Add a cache-buster so freshly uploaded images show immediately
+    const url = selected.thumbnailUrl || selected.imageUrl;
+    elements.avatarPreviewImage.src = selected.updatedAt
+      ? `${url}${url.includes("?") ? "&" : "?"}v=${encodeURIComponent(selected.updatedAt)}`
+      : url;
     elements.avatarPreviewFallback.hidden = true;
     return;
   }
@@ -133,136 +146,158 @@ function renderAvatarPreview(avatar = null) {
   elements.avatarPreviewFallback.hidden = false;
 }
 
-function renderAvatarFolders() {
-  if (!elements.avatarFolderList) {
+// Client-side resize to keep portrait uploads small. We read the file into an
+// Image, draw it to a canvas downscaled to PORTRAIT_MAX_EDGE on the long side,
+// then export as JPEG. Browser canvas is plenty for this — no server-side
+// image library needed. Returns a { blob, width, height, bytes } record.
+async function resizePortrait(file) {
+  if (!file || !file.type.startsWith("image/")) {
+    throw new Error("Pick an image file.");
+  }
+
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("Could not read the file."));
+    reader.readAsDataURL(file);
+  });
+
+  const img = await new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("This image could not be decoded."));
+    image.src = dataUrl;
+  });
+
+  const { naturalWidth: sw, naturalHeight: sh } = img;
+  if (!sw || !sh) {
+    throw new Error("This image has no pixels to crop.");
+  }
+
+  // Center-crop to a square before resizing — cleaner for avatars.
+  const side = Math.min(sw, sh);
+  const sx = Math.floor((sw - side) / 2);
+  const sy = Math.floor((sh - side) / 2);
+
+  const edge = Math.min(PORTRAIT_MAX_EDGE, side);
+  const canvas = document.createElement("canvas");
+  canvas.width = edge;
+  canvas.height = edge;
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(img, sx, sy, side, side, 0, 0, edge, edge);
+
+  // Loop quality down if somehow we exceed the hard limit.
+  let quality = PORTRAIT_JPEG_QUALITY;
+  let blob = await canvasToBlob(canvas, "image/jpeg", quality);
+  while (blob && blob.size > PORTRAIT_HARD_LIMIT_BYTES && quality > 0.4) {
+    quality -= 0.1;
+    blob = await canvasToBlob(canvas, "image/jpeg", quality);
+  }
+  if (!blob) {
+    throw new Error("Could not encode the image.");
+  }
+
+  return { blob, width: edge, height: edge, bytes: blob.size };
+}
+
+function canvasToBlob(canvas, mime, quality) {
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => resolve(blob), mime, quality);
+  });
+}
+
+function formatByteCount(n) {
+  if (!Number.isFinite(n)) return "";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+
+async function handleAvatarFileChosen(file) {
+  if (state.avatarUploading) {
+    return;
+  }
+  if (!file) {
     return;
   }
 
-  elements.avatarFolderList.innerHTML = "";
+  clearMessage(elements.avatarError);
+  clearMessage(elements.avatarSuccess);
+  state.avatarUploading = true;
+  elements.avatarUpload.disabled = true;
+  elements.avatarClear.disabled = true;
+  elements.avatarPreview?.classList.add("is-uploading");
 
-  const rootButton = document.createElement("button");
-  rootButton.type = "button";
-  rootButton.className = "breadcrumb-button";
-  rootButton.textContent = activeAvatarLibrary()?.label || "Library";
-  rootButton.addEventListener("click", () => {
-    browseAvatarLibrary("");
-  });
-  elements.avatarFolderList.append(rootButton);
+  try {
+    if (elements.avatarStatus) {
+      elements.avatarStatus.hidden = false;
+      elements.avatarStatus.textContent = "Resizing image...";
+    }
 
-  state.avatarFolders.forEach((folder) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "breadcrumb-button";
-    button.textContent = folder.name;
-    button.addEventListener("click", () => {
-      browseAvatarLibrary(folder.path);
+    const { blob, width, height, bytes } = await resizePortrait(file);
+
+    // Optimistic preview: show the just-resized image before the upload lands.
+    const previewUrl = URL.createObjectURL(blob);
+    renderAvatarPreview({ kind: "image", imageUrl: previewUrl, thumbnailUrl: previewUrl });
+
+    if (elements.avatarStatus) {
+      elements.avatarStatus.textContent = `Uploading ${width}x${height} • ${formatByteCount(bytes)}...`;
+    }
+
+    const response = await fetch("/api/account/avatar", {
+      method: "POST",
+      headers: { "Content-Type": "image/jpeg" },
+      body: blob
     });
-    elements.avatarFolderList.append(button);
-  });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || "Upload failed.");
+    }
+
+    // Server has saved the file; refresh our account state so preview and nav
+    // avatar come from the server URL (so it persists across reloads).
+    URL.revokeObjectURL(previewUrl);
+    state.account = { ...state.account, user: payload.user };
+    renderAvatarPreview(payload.user.avatar || null);
+    showMessage(elements.avatarSuccess, `Portrait saved (${formatByteCount(bytes)}).`);
+    if (elements.avatarStatus) {
+      elements.avatarStatus.hidden = true;
+      elements.avatarStatus.textContent = "";
+    }
+  } catch (error) {
+    showMessage(elements.avatarError, error.message);
+    if (elements.avatarStatus) {
+      elements.avatarStatus.hidden = true;
+      elements.avatarStatus.textContent = "";
+    }
+    renderAvatarPreview(state.account?.user?.avatar || null);
+  } finally {
+    state.avatarUploading = false;
+    elements.avatarUpload.disabled = false;
+    elements.avatarClear.disabled = false;
+    elements.avatarPreview?.classList.remove("is-uploading");
+    if (elements.avatarFileInput) {
+      elements.avatarFileInput.value = "";
+    }
+  }
 }
 
-function renderAvatarImages() {
-  if (!elements.avatarImageGrid) {
+async function clearAvatar() {
+  if (state.avatarUploading) {
     return;
   }
-
-  elements.avatarImageGrid.innerHTML = "";
-
-  if (!state.avatarImages.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty-state";
-    empty.innerHTML = "<p>No images were found in this folder.</p>";
-    elements.avatarImageGrid.append(empty);
-    return;
+  clearMessage(elements.avatarError);
+  clearMessage(elements.avatarSuccess);
+  try {
+    const payload = await api("/api/account/avatar", { method: "DELETE" });
+    state.account = { ...state.account, user: payload.user };
+    renderAvatarPreview(payload.user.avatar || null);
+    showMessage(elements.avatarSuccess, "Portrait reset to your initial.");
+  } catch (error) {
+    showMessage(elements.avatarError, error.message);
   }
-
-  state.avatarImages.forEach((file) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "avatar-image-option";
-    button.dataset.active = String(file.path === state.avatarPath);
-    button.innerHTML = `
-      <img src="${file.thumbnailUrl || file.url}" alt="${file.name}" />
-      <span>${file.name}</span>
-    `;
-    button.addEventListener("click", () => {
-      state.avatarPath = file.path;
-      renderAvatarImages();
-      renderAvatarPreview({
-        kind: "image",
-        thumbnailUrl: file.thumbnailUrl || file.url,
-        imageUrl: file.url
-      });
-      clearMessage(elements.avatarError);
-    });
-    elements.avatarImageGrid.append(button);
-  });
-}
-
-function renderAvatarLibraries() {
-  if (!elements.avatarLibraryTabs) {
-    return;
-  }
-
-  elements.avatarLibraryTabs.innerHTML = "";
-
-  state.avatarLibraries.forEach((library) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "member-chip";
-    button.dataset.active = String(library.id === state.avatarLibraryId);
-    button.textContent = library.label;
-    button.addEventListener("click", () => {
-      if (state.avatarLibraryId === library.id) {
-        return;
-      }
-
-      state.avatarLibraryId = library.id;
-      state.avatarPath = "";
-      browseAvatarLibrary("");
-    });
-    elements.avatarLibraryTabs.append(button);
-  });
-}
-
-async function browseAvatarLibrary(relativePath = "") {
-  if (!state.avatarLibraryId) {
-    return;
-  }
-
-  const payload = await api(`/api/media/browse?library=${encodeURIComponent(state.avatarLibraryId)}&path=${encodeURIComponent(relativePath)}&type=image&page=1&pageSize=24`);
-  state.avatarCurrentPath = payload.currentPath || "";
-  state.avatarFolders = payload.directories || [];
-  state.avatarImages = payload.files || [];
-  renderAvatarLibraries();
-  renderAvatarFolders();
-  renderAvatarImages();
-  renderAvatarPreview();
-}
-
-async function loadAvatarLibraries() {
-  const payload = await api("/api/media/libraries");
-  state.avatarLibraries = payload.libraries || [];
-
-  if (!state.avatarLibraries.length) {
-    renderAvatarLibraries();
-    renderAvatarFolders();
-    renderAvatarImages();
-    return;
-  }
-
-  const preferredLibrary = state.account?.user?.avatar?.libraryId;
-  state.avatarLibraryId = state.avatarLibraries.some((library) => library.id === preferredLibrary)
-    ? preferredLibrary
-    : state.avatarLibraries[0].id;
-  state.avatarPath = state.account?.user?.avatar?.path || "";
-  await browseAvatarLibrary(state.account?.user?.avatar?.path ? pathDirectory(state.account.user.avatar.path) : "");
-}
-
-function pathDirectory(value = "") {
-  const normalized = String(value || "").replaceAll("\\", "/");
-  const lastSlash = normalized.lastIndexOf("/");
-  return lastSlash >= 0 ? normalized.slice(0, lastSlash) : "";
 }
 
 function renderSummary(user) {
@@ -608,7 +643,7 @@ function render() {
 async function loadAccount() {
   state.account = await api("/api/account");
   render();
-  await loadAvatarLibraries();
+  renderAvatarPreview(state.account?.user?.avatar || null);
   window.dispatchEvent(new Event("hearthboard:nav-refresh"));
 }
 
@@ -652,39 +687,42 @@ elements.profileForm?.addEventListener("submit", async (event) => {
   }
 });
 
-elements.avatarClear?.addEventListener("click", () => {
-  clearMessage(elements.avatarError);
-  clearMessage(elements.avatarSuccess);
-  state.avatarPath = "";
-  renderAvatarImages();
-  renderAvatarPreview(null);
+elements.avatarUpload?.addEventListener("click", () => {
+  elements.avatarFileInput?.click();
 });
 
-elements.avatarSave?.addEventListener("click", async () => {
-  clearMessage(elements.avatarError);
-  clearMessage(elements.avatarSuccess);
-
-  try {
-    const avatar = state.avatarLibraryId && state.avatarPath
-      ? { libraryId: state.avatarLibraryId, path: state.avatarPath }
-      : null;
-    const payload = await api("/api/account/profile", {
-      method: "PATCH",
-      body: JSON.stringify({
-        email: elements.profileEmail.value,
-        phone: elements.profilePhone.value,
-        avatar
-      })
-    });
-    state.account.user = payload.user;
-    render();
-    await loadAvatarLibraries();
+elements.avatarFileInput?.addEventListener("change", async (event) => {
+  const file = event.target.files && event.target.files[0];
+  if (file) {
+    await handleAvatarFileChosen(file);
     window.dispatchEvent(new Event("hearthboard:nav-refresh"));
-    showMessage(elements.avatarSuccess, avatar ? "Portrait updated." : "Portrait reset to your initial.");
-  } catch (error) {
-    showMessage(elements.avatarError, error.message);
   }
 });
+
+elements.avatarClear?.addEventListener("click", async () => {
+  await clearAvatar();
+  window.dispatchEvent(new Event("hearthboard:nav-refresh"));
+});
+
+// Drag-and-drop onto the preview also triggers the upload.
+if (elements.avatarPreview) {
+  elements.avatarPreview.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    elements.avatarPreview.classList.add("is-drop-target");
+  });
+  elements.avatarPreview.addEventListener("dragleave", () => {
+    elements.avatarPreview.classList.remove("is-drop-target");
+  });
+  elements.avatarPreview.addEventListener("drop", async (event) => {
+    event.preventDefault();
+    elements.avatarPreview.classList.remove("is-drop-target");
+    const file = event.dataTransfer?.files?.[0];
+    if (file) {
+      await handleAvatarFileChosen(file);
+      window.dispatchEvent(new Event("hearthboard:nav-refresh"));
+    }
+  });
+}
 
 elements.passwordForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
