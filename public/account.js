@@ -1,3 +1,5 @@
+import { escapeHtml } from "/util.js";
+
 const VISIBILITY_LABELS = {
   public: "Public",
   trusted: "Trusted+",
@@ -441,9 +443,9 @@ function renderDeviceList(devices) {
     summary.className = `device-group-header ${group.anonymousRequests > 0 ? "has-anonymous" : ""}`;
     summary.innerHTML = `
       <div>
-        <h3>${group.ip}</h3>
+        <h3>${escapeHtml(group.ip)}</h3>
         <p class="device-card-meta">${group.identityCount} likely device cluster${group.identityCount === 1 ? "" : "s"} | ${group.authenticatedRequests} authenticated request${group.authenticatedRequests === 1 ? "" : "s"} | ${group.anonymousRequests} anonymous request${group.anonymousRequests === 1 ? "" : "s"}</p>
-        <p class="device-card-meta">${group.usernames?.length ? `People seen here: ${group.usernames.join(", ")}` : "No signed-in people seen from this IP yet"}</p>
+        <p class="device-card-meta">${group.usernames?.length ? `People seen here: ${escapeHtml(group.usernames.join(", "))}` : "No signed-in people seen from this IP yet"}</p>
       </div>
       <span class="device-group-badge ${group.anonymousRequests > 0 ? "is-warn" : ""}">${group.anonymousRequests > 0 ? "Anonymous activity seen" : "Known activity only"}</span>
     `;
@@ -462,13 +464,13 @@ function renderDeviceList(devices) {
       card.className = `device-card${identity.anonymousRequests > 0 ? " has-anonymous" : ""}`;
       card.innerHTML = `
         <div class="device-card-topline">
-          <h3>${identity.label || "Unknown device"}</h3>
-          <span class="device-card-ip">${identity.host || "Unknown host"}</span>
+          <h3>${escapeHtml(identity.label || "Unknown device")}</h3>
+          <span class="device-card-ip">${escapeHtml(identity.host || "Unknown host")}</span>
         </div>
         <p class="device-card-meta">${identity.distinctDeviceCount} stored device id${identity.distinctDeviceCount === 1 ? "" : "s"} | ${identity.requestCount} request${identity.requestCount === 1 ? "" : "s"}</p>
-        <p class="device-card-meta">${identity.usernames?.length ? `Signed in as ${identity.usernames.join(", ")}` : "Never authenticated"}</p>
-        <p class="device-card-meta">First seen ${formatTimestamp(identity.firstSeenAt)} | Last seen ${formatTimestamp(identity.lastSeenAt)}</p>
-        <p class="device-card-agent">${identity.userAgent || "Unknown user agent"}</p>
+        <p class="device-card-meta">${identity.usernames?.length ? `Signed in as ${escapeHtml(identity.usernames.join(", "))}` : "Never authenticated"}</p>
+        <p class="device-card-meta">First seen ${escapeHtml(formatTimestamp(identity.firstSeenAt))} | Last seen ${escapeHtml(formatTimestamp(identity.lastSeenAt))}</p>
+        <p class="device-card-agent">${escapeHtml(identity.userAgent || "Unknown user agent")}</p>
       `;
       list.append(card);
     });
@@ -511,8 +513,8 @@ function renderUserList(users) {
     card.innerHTML = `
       <div class="user-card-topline">
         <div>
-          <h3>${user.memberName || user.username}</h3>
-          <p class="device-card-meta">@${user.username} | ${user.role === "admin" ? "Admin" : (PERMISSION_LABELS[user.permissionLevel] || "Default")}</p>
+          <h3>${escapeHtml(user.memberName || user.username)}</h3>
+          <p class="device-card-meta">@${escapeHtml(user.username)} | ${user.role === "admin" ? "Admin" : (PERMISSION_LABELS[user.permissionLevel] || "Default")}</p>
         </div>
         <span class="device-group-badge ${user.pendingApproval ? "is-warn" : ""}">${user.pendingApproval ? "Pending approval" : "Approved"}</span>
       </div>

@@ -1,3 +1,5 @@
+import { escapeHtml } from "/util.js";
+
 const state = {
   libraries: [],
   activeLibraryId: "",
@@ -306,7 +308,7 @@ function renderLibraryTabs() {
     button.type = "button";
     button.className = "library-tab";
     button.dataset.active = String(library.id === state.activeLibraryId);
-    button.innerHTML = `<span>${library.label}</span><span>&rsaquo;</span>`;
+    button.innerHTML = `<span>${escapeHtml(library.label)}</span><span>&rsaquo;</span>`;
     button.addEventListener("click", async () => {
       state.activeLibraryId = library.id;
       state.activeType = "all";
@@ -366,7 +368,7 @@ function renderFolders() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "folder-link";
-    button.innerHTML = `<span>${directory.name}</span><span>&rsaquo;</span>`;
+    button.innerHTML = `<span>${escapeHtml(directory.name)}</span><span>&rsaquo;</span>`;
     button.addEventListener("click", () => browseLibrary(directory.path, 1));
     elements.folderList.append(button);
   });
@@ -538,9 +540,9 @@ function mediaCard(file) {
   article.innerHTML = `
     <button type="button" class="media-card-thumb"></button>
     <div>
-      <h3 class="media-card-title">${file.name}</h3>
-      <p class="media-card-meta">${file.path}</p>
-      <p class="media-card-meta">${mediaTypeLabels[file.mediaType] || file.mediaType} | ${formatBytes(file.size)} | ${formatTimestamp(file.modifiedAt)} | ${formatViewCount(file.viewCount)}</p>
+      <h3 class="media-card-title">${escapeHtml(file.name)}</h3>
+      <p class="media-card-meta">${escapeHtml(file.path)}</p>
+      <p class="media-card-meta">${escapeHtml(mediaTypeLabels[file.mediaType] || file.mediaType)} | ${escapeHtml(formatBytes(file.size))} | ${escapeHtml(formatTimestamp(file.modifiedAt))} | ${escapeHtml(formatViewCount(file.viewCount))}</p>
     </div>
   `;
 

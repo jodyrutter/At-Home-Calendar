@@ -2,9 +2,11 @@
 	admin off
 	default_sni {$HEARTHBOARD_DEFAULT_SNI:localhost}
 
-	servers {
-		trusted_proxies static private_ranges
-	}
+	# We intentionally leave the `servers { trusted_proxies ... }` block off.
+	# Caddy is the edge — nothing sits in front of it — so the default
+	# ("trust no one") is exactly what we want. With no trusted proxies,
+	# Caddy always rewrites X-Forwarded-For from the actual peer IP and
+	# ignores any client-supplied value.
 }
 
 (hearthboard_common) {
@@ -16,11 +18,13 @@
 		Referrer-Policy no-referrer
 		Permissions-Policy "camera=(), microphone=(), geolocation=(), interest-cohort=()"
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
-		Content-Security-Policy "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; font-src 'self' data:; frame-ancestors 'self' http://localhost https://localhost capacitor://localhost; base-uri 'self'; form-action 'self'; object-src 'none'"
+		Content-Security-Policy "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; script-src 'self'; style-src 'self'; connect-src 'self'; font-src 'self' data:; frame-ancestors 'self' http://localhost https://localhost capacitor://localhost; base-uri 'self'; form-action 'self'; object-src 'none'"
 		-Server
 	}
 
-	reverse_proxy hearthboard:42069
+	reverse_proxy hearthboard:42069 {
+		header_up X-Hearthboard-Edge "caddy"
+	}
 }
 
 {$HEARTHBOARD_LOCAL_SITE_ADDRESSES:localhost 127.0.0.1 192.168.1.118} {

@@ -3,13 +3,13 @@ services:
     image: postgres:16-alpine
     container_name: hearthboard-postgres
     environment:
-      POSTGRES_DB: hearthboard
-      POSTGRES_USER: hearthboard
-      POSTGRES_PASSWORD: hearthboard
+      POSTGRES_DB: "${POSTGRES_DB:-hearthboard}"
+      POSTGRES_USER: "${POSTGRES_USER:-hearthboard}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}"
     volumes:
       - hearthboard-postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U hearthboard -d hearthboard"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hearthboard} -d ${POSTGRES_DB:-hearthboard}"]
       interval: 10s
       timeout: 5s
       retries: 8
@@ -25,7 +25,7 @@ services:
       HOST: 0.0.0.0
       PORT: 42069
       DATA_DIR: /app/data
-      DATABASE_URL: postgresql://hearthboard:hearthboard@postgres:5432/hearthboard
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-hearthboard}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/${POSTGRES_DB:-hearthboard}"
       APP_TIMEZONE: America/Port-au-Prince
       HOUSEHOLD_NAME: Hearthboard Household
       TRUST_PROXY_HEADERS: "true"

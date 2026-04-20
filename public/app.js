@@ -1,3 +1,5 @@
+import { escapeHtml } from "/util.js";
+
 const searchParams = new URLSearchParams(window.location.search);
 
 const state = {
@@ -269,7 +271,12 @@ function renderFilters() {
     button.type = "button";
     button.className = "member-chip";
     button.dataset.active = String(state.activeFilters.has(member.id));
-    button.innerHTML = `<span class="member-swatch" style="background:${member.color}"></span>${member.name}`;
+    button.innerHTML = `<span class="member-swatch"></span>${escapeHtml(member.name)}`;
+    // Set the swatch color via the CSSOM so CSP can forbid inline style
+    // attributes. Setting .style.* programmatically is allowed even under
+    // `style-src 'self'` without `'unsafe-inline'`.
+    const swatch = button.querySelector(".member-swatch");
+    if (swatch) swatch.style.background = member.color;
     button.addEventListener("click", () => {
       if (state.activeFilters.has(member.id)) {
         state.activeFilters.delete(member.id);
@@ -314,14 +321,19 @@ function renderCalendar() {
         <span class="meta-label">${dayEvents.length ? `${dayEvents.length} item${dayEvents.length > 1 ? "s" : ""}` : ""}</span>
       </div>
       <div class="stack">
-        ${dayEvents.map((event) => `
-          <div class="event-pill" style="border-left-color:${categoryColor(event.category)}">
-            <strong>${event.title}</strong><br />
-            <span>${event.allDay ? "All day" : formatEventRange(event)}</span>
+        ${dayEvents.map((event, pillIndex) => `
+          <div class="event-pill" data-pill-index="${pillIndex}">
+            <strong>${escapeHtml(event.title)}</strong><br />
+            <span>${event.allDay ? "All day" : escapeHtml(formatEventRange(event))}</span>
           </div>
         `).join("")}
       </div>
     `;
+    // Apply per-category tint through the CSSOM, not inline style attrs.
+    dayEvents.forEach((event, pillIndex) => {
+      const pill = button.querySelector(`.event-pill[data-pill-index="${pillIndex}"]`);
+      if (pill) pill.style.borderLeftColor = categoryColor(event.category);
+    });
     button.addEventListener("click", () => {
       state.selectedDate = dateKey;
       render();
@@ -370,10 +382,12 @@ function renderMembers() {
     const article = document.createElement("article");
     article.className = "member-card";
     article.innerHTML = `
-      <h3><span class="member-swatch" style="background:${member.color}"></span>${member.name}</h3>
-      <p>${member.role || (member.username ? `@${member.username}` : "Household account")}</p>
+      <h3><span class="member-swatch"></span>${escapeHtml(member.name)}</h3>
+      <p>${member.role ? escapeHtml(member.role) : (member.username ? `@${escapeHtml(member.username)}` : "Household account")}</p>
       <p>${assignments} scheduled item${assignments === 1 ? "" : "s"}</p>
     `;
+    const memberSwatch = article.querySelector(".member-swatch");
+    if (memberSwatch) memberSwatch.style.background = member.color;
     elements.memberList.append(article);
   });
 }
@@ -433,13 +447,13 @@ function eventCard(event, includeEdit = true) {
   const canComplete = currentUserCanComplete(event);
 
   article.innerHTML = `
-    <h3>${event.title}</h3>
-    <p class="event-card-meta">${formatEventRange(event)}</p>
-    <p class="event-card-meta">${event.category}${event.location ? ` | ${event.location}` : ""}</p>
-    <p class="event-card-meta">${assignedNames || "Unassigned"}</p>
-    ${eventNotificationSummary(event) ? `<p class="event-card-meta">${eventNotificationSummary(event)}</p>` : ""}
-    ${completedAt ? `<p class="event-card-meta">Done by you at ${formatTimestamp(completedAt)}</p>` : ""}
-    ${event.description ? `<p class="event-card-meta">${event.description}</p>` : ""}
+    <h3>${escapeHtml(event.title)}</h3>
+    <p class="event-card-meta">${escapeHtml(formatEventRange(event))}</p>
+    <p class="event-card-meta">${escapeHtml(event.category)}${event.location ? ` | ${escapeHtml(event.location)}` : ""}</p>
+    <p class="event-card-meta">${escapeHtml(assignedNames || "Unassigned")}</p>
+    ${eventNotificationSummary(event) ? `<p class="event-card-meta">${escapeHtml(eventNotificationSummary(event))}</p>` : ""}
+    ${completedAt ? `<p class="event-card-meta">Done by you at ${escapeHtml(formatTimestamp(completedAt))}</p>` : ""}
+    ${event.description ? `<p class="event-card-meta">${escapeHtml(event.description)}</p>` : ""}
   `;
 
   if (includeEdit || canComplete) {
@@ -482,17 +496,17 @@ function bulletinCard(bulletin) {
   article.dataset.pinned = String(Boolean(bulletin.pinned));
   article.innerHTML = `
     <div class="bulletin-topline">
-      <h3>${bulletin.title}</h3>
+      <h3>${escapeHtml(bulletin.title)}</h3>
       <button type="button" class="link-button">Edit</button>
     </div>
     <div class="bulletin-meta">
       <div class="bulletin-tag-row">
-        <span class="bulletin-tag">${bulletin.tone}</span>
+        <span class="bulletin-tag">${escapeHtml(bulletin.tone)}</span>
         ${bulletin.pinned ? '<span class="bulletin-tag pinned">Pinned</span>' : ""}
       </div>
-      <span class="event-card-meta">${bulletin.author} | ${formatTimestamp(bulletin.createdAt)}</span>
+      <span class="event-card-meta">${escapeHtml(bulletin.author)} | ${escapeHtml(formatTimestamp(bulletin.createdAt))}</span>
     </div>
-    <p class="bulletin-message">${bulletin.message}</p>
+    <p class="bulletin-message">${escapeHtml(bulletin.message)}</p>
   `;
 
   article.querySelector(".link-button").addEventListener("click", () => openBulletinModal(bulletin));
@@ -621,5 +635,5 @@ function bindEvents() {
 
 bindEvents();
 loadBoard().catch((error) => {
-  elements.selectedDayEvents.innerHTML = `<div class="empty-state"><p>${error.message}</p></div>`;
+  elements.selectedDayEvents.innerHTML = `<div class="empty-state"><p>${escapeHtml(error.message)}</p></div>`;
 });

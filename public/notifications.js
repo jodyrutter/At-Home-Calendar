@@ -1,3 +1,5 @@
+import { escapeHtml } from "/util.js";
+
 const elements = {
   heading: document.querySelector("#notifications-heading"),
   summary: document.querySelector("#notifications-summary"),
@@ -65,16 +67,16 @@ function reminderCard(notification) {
   article.innerHTML = `
     <div class="notification-card-topline">
       <div>
-        <p class="meta-label">Scheduled ${formatTimestamp(notification.scheduledAt)}</p>
-        <h3>${notification.title}</h3>
+        <p class="meta-label">Scheduled ${escapeHtml(formatTimestamp(notification.scheduledAt))}</p>
+        <h3>${escapeHtml(notification.title)}</h3>
       </div>
-      <span class="notification-pill">${notification.dismissed ? "Dismissed" : notification.offsetLabel}</span>
+      <span class="notification-pill">${notification.dismissed ? "Dismissed" : escapeHtml(notification.offsetLabel)}</span>
     </div>
-    <p class="notification-body">${notification.body}</p>
-    <p class="event-card-meta">${notification.eventTitle}${notification.location ? ` | ${notification.location}` : ""}${notification.aiGenerated ? " | Jody AI written" : ""}</p>
+    <p class="notification-body">${escapeHtml(notification.body)}</p>
+    <p class="event-card-meta">${escapeHtml(notification.eventTitle)}${notification.location ? ` | ${escapeHtml(notification.location)}` : ""}${notification.aiGenerated ? " | Jody AI written" : ""}</p>
     ${siblingBadge}
     <div class="notification-actions">
-      <a class="button button-secondary" href="${notification.url}">Open event</a>
+      <a class="button button-secondary" href="${escapeHtml(notification.url)}">Open event</a>
       ${notification.dismissed ? "" : `<button class="button button-secondary" type="button" data-action="dismiss">Dismiss this one</button>`}
       ${notification.dismissed ? "" : `<button class="button button-primary" type="button" data-action="complete">Task finished</button>`}
     </div>

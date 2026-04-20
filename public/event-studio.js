@@ -1,3 +1,5 @@
+import { escapeHtml } from "/util.js";
+
 const searchParams = new URLSearchParams(window.location.search);
 
 const state = {
@@ -108,9 +110,11 @@ function renderMemberCheckboxes() {
   state.members.forEach((member) => {
     const label = document.createElement("label");
     label.innerHTML = `
-      <input type="checkbox" name="memberIds" value="${member.id}" />
-      <span><span class="member-swatch" style="background:${member.color}"></span>${member.name}</span>
+      <input type="checkbox" name="memberIds" value="${escapeHtml(member.id)}" />
+      <span><span class="member-swatch"></span>${escapeHtml(member.name)}</span>
     `;
+    const swatch = label.querySelector(".member-swatch");
+    if (swatch) swatch.style.background = member.color;
     elements.memberCheckboxes.append(label);
   });
 }
@@ -124,8 +128,8 @@ function renderNotificationCheckboxes() {
   state.notificationTargets.forEach((target) => {
     const label = document.createElement("label");
     label.innerHTML = `
-      <input type="checkbox" name="notificationTargetUserIds" value="${target.id}" />
-      <span>${target.label}</span>
+      <input type="checkbox" name="notificationTargetUserIds" value="${escapeHtml(target.id)}" />
+      <span>${escapeHtml(target.label)}</span>
     `;
     elements.notificationTargetCheckboxes.append(label);
   });
@@ -133,8 +137,8 @@ function renderNotificationCheckboxes() {
   state.reminderOptions.forEach((option) => {
     const label = document.createElement("label");
     label.innerHTML = `
-      <input type="checkbox" name="notificationOffsetsMinutes" value="${option.offsetMinutes}" />
-      <span>${option.label}</span>
+      <input type="checkbox" name="notificationOffsetsMinutes" value="${escapeHtml(option.offsetMinutes)}" />
+      <span>${escapeHtml(option.label)}</span>
     `;
     elements.notificationOffsetCheckboxes.append(label);
   });

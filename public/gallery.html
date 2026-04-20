@@ -5,13 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Hearthboard Gallery</title>
     <meta name="theme-color" content="#dd6b20" />
-    <script>
-      (() => {
-        const savedTheme = localStorage.getItem("hearthboard-theme");
-        const preferredDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
-        document.documentElement.dataset.theme = savedTheme || (preferredDark ? "dark" : "light");
-      })();
-    </script>
+    <script src="/theme-preload.js"></script>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="shortcut icon" href="/favicon.svg" />
     <link rel="stylesheet" href="/styles.css" />

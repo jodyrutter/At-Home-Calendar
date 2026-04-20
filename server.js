@@ -753,11 +753,30 @@ function synchronizeMembersWithUsers() {
   return userIdMap;
 }
 
+// Upper bounds that match (and slightly exceed) the maxlength attributes on
+// the matching form controls in public/event-studio.html. The server owns the
+// contract here — a crafted client can always bypass HTML maxlength — so we
+// re-enforce it. These also keep a malicious user from stuffing arbitrarily
+// huge payloads into the store just to make other users' pages slow to render.
+const EVENT_TITLE_MAX_LEN = 200;
+const EVENT_DESCRIPTION_MAX_LEN = 2000;
+const EVENT_CATEGORY_MAX_LEN = 80;
+const EVENT_LOCATION_MAX_LEN = 240;
+const BULLETIN_TITLE_MAX_LEN = 200;
+const BULLETIN_MESSAGE_MAX_LEN = 4000;
+const BULLETIN_AUTHOR_MAX_LEN = 80;
+const BULLETIN_TONE_MAX_LEN = 40;
+
+function clampString(value, maxLen) {
+  const trimmed = String(value || "").trim();
+  return trimmed.length > maxLen ? trimmed.slice(0, maxLen) : trimmed;
+}
+
 function normalizeEventPayload(payload, existingEvent = null) {
-  const title = String(payload.title || "").trim();
-  const description = String(payload.description || "").trim();
-  const category = String(payload.category || "General").trim() || "General";
-  const location = String(payload.location || "").trim();
+  const title = clampString(payload.title, EVENT_TITLE_MAX_LEN);
+  const description = clampString(payload.description, EVENT_DESCRIPTION_MAX_LEN);
+  const category = clampString(payload.category, EVENT_CATEGORY_MAX_LEN) || "General";
+  const location = clampString(payload.location, EVENT_LOCATION_MAX_LEN);
   const allDay = Boolean(payload.allDay);
   const start = new Date(payload.start);
   const end = new Date(payload.end);
@@ -805,10 +824,10 @@ function normalizeEventPayload(payload, existingEvent = null) {
 }
 
 function normalizeBulletinPayload(payload, existingBulletin = null) {
-  const title = String(payload.title || "").trim();
-  const message = String(payload.message || "").trim();
-  const author = String(payload.author || "").trim();
-  const tone = String(payload.tone || "Note").trim() || "Note";
+  const title = clampString(payload.title, BULLETIN_TITLE_MAX_LEN);
+  const message = clampString(payload.message, BULLETIN_MESSAGE_MAX_LEN);
+  const author = clampString(payload.author, BULLETIN_AUTHOR_MAX_LEN);
+  const tone = clampString(payload.tone, BULLETIN_TONE_MAX_LEN) || "Note";
   const pinned = Boolean(payload.pinned);
 
   if (!title) {
@@ -1854,9 +1873,21 @@ function requestIsLan(request) {
 }
 
 function requestIsLocalMachine(request) {
-  const hostname = requestHostname(request);
-  const ip = requestClientIp(request);
-  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || ip === "127.0.0.1" || ip === "::1";
+  // Caddy unconditionally sets X-Hearthboard-Edge: caddy on every proxied
+  // request (see Caddyfile). Any request carrying that header has traversed
+  // the reverse proxy and MUST NOT be treated as local, regardless of what
+  // Host or X-Forwarded-For headers it claims.
+  //
+  // Requests that reach this process without the edge marker came in
+  // directly against the container's listener — which is only reachable
+  // from the host's loopback (Docker publishes port 42070 on 127.0.0.1).
+  // That is the tray script and any other on-machine tooling.
+  const edgeMarker = String(request.headers["x-hearthboard-edge"] || "").trim().toLowerCase();
+  if (edgeMarker === "caddy") {
+    return false;
+  }
+
+  return true;
 }
 
 function requestCanSelfRegister(request) {
