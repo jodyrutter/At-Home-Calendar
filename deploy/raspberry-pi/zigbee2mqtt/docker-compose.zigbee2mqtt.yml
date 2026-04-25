@@ -1,0 +1,33 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: zigbee-mosquitto
+    restart: unless-stopped
+    # Expose port 1883 on the Pi host so Hearthboard (in its own compose
+    # stack) can reach the broker via host.docker.internal:1883.
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - zigbee-mosquitto-data:/mosquitto/data
+      - zigbee-mosquitto-log:/mosquitto/log
+
+  zigbee2mqtt:
+    image: ghcr.io/koenkk/zigbee2mqtt:latest
+    container_name: zigbee2mqtt
+    restart: unless-stopped
+    depends_on:
+      - mosquitto
+    ports:
+      - "8099:8080"
+    volumes:
+      - ./data:/app/data
+      - /run/udev:/run/udev:ro
+    devices:
+      - /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0:/dev/ttyUSB0
+    environment:
+      TZ: America/Port-au-Prince
+
+volumes:
+  zigbee-mosquitto-data:
+  zigbee-mosquitto-log:

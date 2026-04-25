@@ -50,13 +50,7 @@ SYNC_PHONE_QUARANTINE="$(normalize_flag "${SYNC_PHONE_QUARANTINE:-1}")"
 SYNC_DRONE="$(normalize_flag "${SYNC_DRONE:-1}")"
 DRONE_VIDEO_FORCE_REGEN="$(normalize_flag "${DRONE_VIDEO_FORCE_REGEN:-0}")"
 
-DEFAULT_DRONE_TRANSCODE_JOBS="2"
-if command -v nproc >/dev/null 2>&1; then
-  cpu_count="$(nproc)"
-  if [[ "$cpu_count" -ge 4 ]]; then
-    DEFAULT_DRONE_TRANSCODE_JOBS="3"
-  fi
-fi
+DEFAULT_DRONE_TRANSCODE_JOBS="1"
 DRONE_TRANSCODE_JOBS="${DRONE_TRANSCODE_JOBS:-$DEFAULT_DRONE_TRANSCODE_JOBS}"
 
 DESKTOP_ROOT="${PI_DESKTOP_EXPORT_ROOT:-/mnt/hearthboard-pc}"
@@ -140,7 +134,7 @@ transcode_drone_media() {
 
   case "$extension" in
     jpg|jpeg|png|webp)
-      if ! ffmpeg -hide_banner -loglevel error -y -i "$source_file" \
+      if ! run_transcode ffmpeg -hide_banner -loglevel error -y -i "$source_file" \
         -vf "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease" \
         "$target_file"; then
         echo "Warning: failed to transcode image: $source_file" >&2
@@ -148,8 +142,8 @@ transcode_drone_media() {
       fi
       ;;
     mp4|mov|m4v|webm)
-      if ! ffmpeg -hide_banner -loglevel error -y -i "$source_file" \
-        -vf "scale='min(1280,iw)':'min(720,ih)':force_original_aspect_ratio=decrease" \
+      if ! run_transcode ffmpeg -hide_banner -loglevel error -y -i "$source_file" \
+        -vf "scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease" \
         -c:v libx264 -preset veryfast -crf 24 -pix_fmt yuv420p \
         -movflags +faststart -c:a aac -b:a 128k \
         "$target_file"; then
@@ -162,9 +156,23 @@ transcode_drone_media() {
   esac
 }
 
+run_transcode() {
+  local -a cmd=("$@")
+  if command -v ionice >/dev/null 2>&1 && command -v nice >/dev/null 2>&1; then
+    ionice -c2 -n7 nice -n 10 "${cmd[@]}"
+    return
+  fi
+  if command -v nice >/dev/null 2>&1; then
+    nice -n 10 "${cmd[@]}"
+    return
+  fi
+  "${cmd[@]}"
+}
+
 export DRONE_SOURCE_DIR
 export PI_DRONE_MIRROR_DIR
 export -f transcode_drone_media
+export -f run_transcode
 
 echo "Transcoding drone media to 1080p mirror..."
 find "$DRONE_SOURCE_DIR" -type f -print0 | \

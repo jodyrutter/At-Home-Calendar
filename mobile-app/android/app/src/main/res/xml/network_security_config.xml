@@ -7,6 +7,7 @@
   </base-config>
 
   <domain-config cleartextTrafficPermitted="false">
+    <domain includeSubdomains="false">192.168.1.220</domain>
     <domain includeSubdomains="false">192.168.1.118</domain>
     <trust-anchors>
       <certificates src="@raw/hearthboard_local_root" />

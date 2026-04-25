@@ -30,6 +30,7 @@ public class MainActivity extends BridgeActivity {
     private com.getcapacitor.CapConfig buildLauncherConfig() {
         String preferredRoute = determinePreferredRoute();
         String[] allowNavigationHosts = new String[] {
+            "192.168.1.220",
             "192.168.1.118",
             "jodyrutter-sh.duckdns.org"
         };

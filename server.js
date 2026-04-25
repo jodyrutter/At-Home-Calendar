@@ -80,7 +80,7 @@ const AUTH_RATE_LIMIT_MAX_ATTEMPTS = 10;
 const ADMIN_USERNAME = "jodyrutter";
 const VISIBILITY_OPTIONS = new Set(["public", "trusted", "family", "admin"]);
 const PERMISSION_LEVELS = ["default", "trusted", "family", "admin"];
-const PAGE_KEYS = ["calendar", "gallery", "assistant"];
+const PAGE_KEYS = ["calendar", "gallery", "assistant", "smarthome"];
 const EVENT_NOTIFICATION_OFFSET_OPTIONS = [1440, 180, 60, 10, 0];
 const EVENT_NOTIFICATION_REPEAT_INTERVAL_OPTIONS = [5, 10, 15, 30];
 const EVENT_NOTIFICATION_ANNOY_LEVEL_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
@@ -100,6 +100,10 @@ const SPEEDTEST_BACKGROUND_INITIAL_DELAY_MS = normalizePositiveInteger(
 );
 const SPEEDTEST_BACKGROUND_RUNNER_LABEL =
   String(process.env.SPEEDTEST_BACKGROUND_RUNNER_LABEL || "Hearthboard Pi").trim() || "Hearthboard Pi";
+// Zigbee2MQTT MQTT broker URL. When set, Hearthboard subscribes to device
+// state and can send commands. Example: mqtt://host.docker.internal:1883
+const ZIGBEE_MQTT_URL = String(process.env.ZIGBEE_MQTT_URL || "").trim();
+
 const VISIBILITY_RANKS = new Map([
   ["public", 0],
   ["trusted", 1],
@@ -229,7 +233,9 @@ function defaultPageVisibility() {
   return {
     calendar: { lan: "public", remote: "family" },
     gallery: { lan: "public", remote: "public" },
-    assistant: { lan: "trusted", remote: "trusted" }
+    assistant: { lan: "trusted", remote: "trusted" },
+    // Smart home: anyone on the LAN can operate lights; remote access requires family+
+    smarthome: { lan: "public", remote: "family" }
   };
 }
 
@@ -1962,12 +1968,12 @@ function requestRefererOrigin(request) {
 }
 
 function canonicalRequestOrigin(request) {
-  const host = requestHostname(request);
-  if (!host) {
+  const hostHeader = forwardedHost(request) || String(request.headers.host || "").trim();
+  if (!hostHeader) {
     return "";
   }
 
-  return `${requestIsSecure(request) ? "https" : "http"}://${host}`;
+  return `${requestIsSecure(request) ? "https" : "http"}://${hostHeader.toLowerCase()}`;
 }
 
 function requestRequiresSameOriginProtection(request) {
@@ -7285,6 +7291,182 @@ function sendHtmlShell(response, filename) {
   return response.sendFile(path.join(__dirname, "public", filename));
 }
 
+// ── Smart Home / Zigbee2MQTT ─────────────────────────────────────────────────
+
+/** In-memory device state keyed by Z2M friendly_name. */
+const smarthomeDevices = new Map();
+let smarthomeMqttClient = null;
+
+/**
+ * If a friendly_name ends with '#', it belongs to a fixture.
+ * The fixture group key is the name with trailing '#' stripped,
+ * then trailing digits/spaces stripped.
+ * e.g. "Bedroom 1#" → "Bedroom", "Bedroom 2#" → "Bedroom" → same fixture.
+ */
+function smarthomeFixtureKey(friendlyName) {
+  const name = String(friendlyName || "").trim();
+  if (!name.endsWith("#")) return null;
+  const base = name.slice(0, -1).replace(/[\s\d]+$/, "").trim();
+  return base || null;
+}
+
+function extractLightFeatures(exposes) {
+  const features = new Set();
+  for (const expose of exposes || []) {
+    if (expose.type === "light") {
+      for (const f of expose.features || []) {
+        if (f.name) features.add(f.name);
+      }
+    }
+  }
+  return [...features];
+}
+
+async function initSmarthome() {
+  if (!ZIGBEE_MQTT_URL) {
+    console.log("[smarthome] ZIGBEE_MQTT_URL not set — smart home panel is passive.");
+    return;
+  }
+
+  let mqttPkg;
+  try {
+    mqttPkg = await import("mqtt");
+  } catch {
+    console.warn("[smarthome] 'mqtt' package unavailable — run: npm install mqtt");
+    return;
+  }
+
+  const client = mqttPkg.connect(ZIGBEE_MQTT_URL, {
+    clientId: `hearthboard-${nanoid(6)}`,
+    reconnectPeriod: 8000,
+    connectTimeout: 15000
+  });
+  smarthomeMqttClient = client;
+
+  client.on("connect", () => {
+    console.log(`[smarthome] Connected to MQTT at ${ZIGBEE_MQTT_URL}`);
+    client.subscribe("zigbee2mqtt/#", { qos: 0 });
+  });
+
+  client.on("message", (topic, payload) => {
+    let data;
+    try { data = JSON.parse(payload.toString()); } catch { return; }
+
+    if (topic === "zigbee2mqtt/bridge/devices") {
+      if (!Array.isArray(data)) return;
+      for (const device of data) {
+        const name = device.friendly_name;
+        if (!name || name === "Coordinator") continue;
+        const existing = smarthomeDevices.get(name) || {};
+        smarthomeDevices.set(name, {
+          ...existing,
+          friendlyName: name,
+          ieeeAddress: device.ieee_address || null,
+          deviceType: device.type || null,
+          features: extractLightFeatures(device.definition?.exposes),
+          disabled: Boolean(device.disabled),
+          model: device.definition?.model || null
+        });
+      }
+    } else if (topic.startsWith("zigbee2mqtt/") && !topic.includes("/bridge/")) {
+      const rest = topic.slice("zigbee2mqtt/".length);
+      // Only handle top-level device state topics (no sub-paths like device/availability)
+      if (rest.includes("/")) return;
+      const existing = smarthomeDevices.get(rest) || { friendlyName: rest };
+      smarthomeDevices.set(rest, {
+        ...existing,
+        state: { ...(existing.state || {}), ...data },
+        lastSeen: new Date().toISOString()
+      });
+    }
+  });
+
+  client.on("error", (err) => {
+    console.error(`[smarthome] MQTT error: ${err?.message || err}`);
+  });
+  client.on("reconnect", () => {
+    console.log("[smarthome] MQTT reconnecting...");
+  });
+}
+
+// GET /api/smarthome/devices
+app.get("/api/smarthome/devices", (request, response) => {
+  if (!requestCanViewPage(request, "smarthome")) {
+    return response.status(403).json({ error: "Access denied." });
+  }
+
+  if (!ZIGBEE_MQTT_URL) {
+    return response.json({ enabled: false, connected: false, devices: [] });
+  }
+
+  const connected = Boolean(smarthomeMqttClient?.connected);
+  const devices = [];
+
+  for (const [, device] of smarthomeDevices) {
+    if (device.disabled) continue;
+    // Surface devices that are lights (have light features OR have light-like state)
+    const hasLightFeatures = (device.features?.length ?? 0) > 0;
+    const hasLightState = device.state && ("state" in device.state || "brightness" in device.state);
+    if (!hasLightFeatures && !hasLightState) continue;
+
+    const fixtureName = smarthomeFixtureKey(device.friendlyName);
+    devices.push({
+      friendlyName: device.friendlyName,
+      fixtureName,
+      fixtureId: fixtureName
+        ? fixtureName.toLowerCase().replace(/[^a-z0-9]+/g, "_")
+        : null,
+      features: device.features || [],
+      state: device.state || {},
+      lastSeen: device.lastSeen || null,
+      model: device.model || null
+    });
+  }
+
+  return response.json({ enabled: true, connected, devices });
+});
+
+// POST /api/smarthome/command
+app.post("/api/smarthome/command", async (request, response) => {
+  if (!requestCanViewPage(request, "smarthome")) {
+    return response.status(403).json({ error: "Access denied." });
+  }
+
+  if (!smarthomeMqttClient?.connected) {
+    return response.status(503).json({ error: "Smart home broker not connected." });
+  }
+
+  const { targets, command } = request.body || {};
+  if (!Array.isArray(targets) || targets.length === 0 || !command || typeof command !== "object") {
+    return response.status(400).json({ error: "targets (array) and command (object) are required." });
+  }
+
+  const publishPromises = targets.map((name) => {
+    if (!name || typeof name !== "string") return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      smarthomeMqttClient.publish(
+        `zigbee2mqtt/${String(name).trim()}/set`,
+        JSON.stringify(command),
+        { qos: 1 },
+        (err) => (err ? reject(err) : resolve())
+      );
+    });
+  });
+
+  try {
+    await Promise.all(publishPromises);
+    return response.json({ ok: true });
+  } catch (err) {
+    return response.status(500).json({ error: `Command failed: ${err?.message || "unknown"}` });
+  }
+});
+
+// ── Smart Home page route ─────────────────────────────────────────────────────
+app.get("/smarthome", (_request, response) => {
+  sendHtmlShell(response, "smarthome.html");
+});
+
+// ── Gallery and other page routes ─────────────────────────────────────────────
 app.get("/gallery", (_request, response) => {
   sendHtmlShell(response, "gallery.html");
 });
@@ -7334,6 +7516,7 @@ app.listen(PORT, HOST, () => {
   console.log(`Hearthboard is running on http://${HOST}:${PORT}`);
   warmMediaIndexes();
   startBackgroundSpeedtestScheduler();
+  initSmarthome().catch((err) => console.error("[smarthome] init failed:", err?.message || err));
 
   // Start the twice-daily (00:00 + 12:00 local) calendar sync scheduler.
   // We only start it if token encryption + at least one provider are

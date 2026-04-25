@@ -723,7 +723,9 @@ function openViewer(file) {
   } else if (file.mediaType === "video") {
     const preferProxyPlayback = libraryShouldPreferProxyPlayback();
     const preferredOriginalAvailable = canUsePreferredOriginal();
-    const preferredQuality = preferProxyPlayback ? "p720" : autoVideoQualityPreference();
+    const preferredQuality = preferProxyPlayback
+      ? (preferredOriginalAvailable ? "desktop4k" : "p720")
+      : autoVideoQualityPreference();
     const qualityWrap = document.createElement("div");
     qualityWrap.className = "video-quality-bar";
 
@@ -742,7 +744,11 @@ function openViewer(file) {
       option.textContent = videoQualityLabels[quality];
       qualitySelect.append(option);
     });
-    qualitySelect.value = preferredQuality === "p720" ? "auto" : "original";
+    if (preferProxyPlayback) {
+      qualitySelect.value = "auto";
+    } else {
+      qualitySelect.value = preferredQuality === "p720" ? "auto" : "original";
+    }
 
     const video = document.createElement("video");
     video.controls = true;
@@ -751,6 +757,10 @@ function openViewer(file) {
     const qualityHint = document.createElement("span");
     qualityHint.className = "video-quality-hint";
     qualityHint.textContent = "Preparing playback...";
+
+    const sourceBadge = document.createElement("span");
+    sourceBadge.className = "video-source-badge";
+    sourceBadge.textContent = "Checking source...";
 
     const download = document.createElement("a");
     download.className = "button button-secondary viewer-download";
@@ -777,13 +787,19 @@ function openViewer(file) {
       }
     }
 
-    const applyVideoSource = (requestedQuality, sourceUrl, hintText) => {
+    const setSourceBadge = (sourceLabel, tone = "neutral") => {
+      sourceBadge.textContent = sourceLabel;
+      sourceBadge.dataset.tone = tone;
+    };
+
+    const applyVideoSource = (requestedQuality, sourceUrl, hintText, sourceLabel, sourceTone = "neutral") => {
       const currentTime = video.currentTime;
       const wasPaused = video.paused;
       const normalizedSource = new URL(sourceUrl, window.location.origin).href;
 
       if (video.currentSrc === normalizedSource || video.src === normalizedSource) {
         qualityHint.textContent = hintText;
+        setSourceBadge(sourceLabel, sourceTone);
         download.href = sourceUrl;
         return;
       }
@@ -791,6 +807,7 @@ function openViewer(file) {
       video.src = sourceUrl;
       download.href = sourceUrl;
       qualityHint.textContent = hintText;
+      setSourceBadge(sourceLabel, sourceTone);
       video.load();
       video.addEventListener(
         "loadedmetadata",
@@ -812,25 +829,40 @@ function openViewer(file) {
       if (selection === "desktop4k") {
         if (!preferredOriginalAvailable) {
           qualityHint.textContent = "Desktop 4K is unavailable right now.";
+          setSourceBadge("Desktop 4K offline", "offline");
           return;
         }
         applyVideoSource(
           "desktop4k",
           forcePreferredOriginalUrl(file),
-          "Streaming the desktop 4K original over the network."
+          "Streaming the desktop 4K original over the network.",
+          "Desktop 4K",
+          "desktop"
         );
         return;
       }
 
       if (selection === "original") {
-        applyVideoSource("original", videoSourceForQuality(file, "original"), "Playing the original video.");
+        applyVideoSource(
+          "original",
+          videoSourceForQuality(file, "original"),
+          "Playing the original video.",
+          "Original source",
+          "neutral"
+        );
         return;
       }
 
       if (selection === "p720") {
         const ready = await getVideoProxyStatus(file, "720p").catch(() => false);
         if (ready) {
-          applyVideoSource("p720", videoSourceForQuality(file, "p720"), "Playing the cached 720p version.");
+          applyVideoSource(
+            "p720",
+            videoSourceForQuality(file, "p720"),
+            "Playing the cached 720p version.",
+            "Pi 1080p/720p mirror",
+            "mirror"
+          );
           return;
         }
 
@@ -840,52 +872,91 @@ function openViewer(file) {
             videoSourceForQuality(file, "original"),
             preferredOriginalAvailable
               ? "Playing the faster Pi-local copy while 720p prepares. Use Desktop 4K to stream the original full-resolution file."
-              : "Playing the faster Pi-local copy while the 720p version prepares in the background."
+              : "Playing the faster Pi-local copy while the 720p version prepares in the background.",
+            "Pi mirror fallback",
+            "mirror"
           );
           prepareVideoProxy(file, "720p").catch(() => {});
           return;
         }
 
-        applyVideoSource("original", videoSourceForQuality(file, "original"), "Preparing the 720p version in the background. Still playing the original for now.");
+        applyVideoSource(
+          "original",
+          videoSourceForQuality(file, "original"),
+          "Preparing the 720p version in the background. Still playing the original for now.",
+          "Original source",
+          "neutral"
+        );
         prepareVideoProxy(file, "720p").catch(() => {});
         return;
       }
 
       const autoQuality = autoVideoQualityPreference();
-      if (autoQuality === "p720" || preferProxyPlayback) {
+      if (preferProxyPlayback) {
+        if (preferredOriginalAvailable) {
+          applyVideoSource(
+            "desktop4k",
+            forcePreferredOriginalUrl(file),
+            "Auto selected Desktop 4K because the full-resolution source is online. If it slows down, switch to 720p.",
+            "Desktop 4K",
+            "desktop"
+          );
+          return;
+        }
+
         const ready = await getVideoProxyStatus(file, "720p").catch(() => false);
         if (ready) {
           applyVideoSource(
             "p720",
             videoSourceForQuality(file, "p720"),
-            preferProxyPlayback
-              ? (
-                  preferredOriginalAvailable
-                    ? "Auto chose 720p for smoother playback. The source library is still full-resolution; pick Desktop 4K to stream the original."
-                    : "Auto chose 720p for smoother playback while the full-resolution desktop source is unavailable."
-                )
-              : "Auto selected 720p for this device or connection."
+            "Auto fell back to the Pi mirror because the desktop 4K source is unavailable.",
+            "Pi 1080p/720p mirror",
+            "mirror"
           );
           return;
         }
 
         prepareVideoProxy(file, "720p").catch(() => {});
-        if (preferProxyPlayback) {
+        applyVideoSource(
+          "original",
+          videoSourceForQuality(file, "original"),
+          "Desktop 4K is unavailable, so Auto is starting with the Pi-local copy while a lighter fallback prepares.",
+          "Pi mirror fallback",
+          "mirror"
+        );
+        return;
+      }
+
+      if (autoQuality === "p720") {
+        const ready = await getVideoProxyStatus(file, "720p").catch(() => false);
+        if (ready) {
           applyVideoSource(
-            "original",
-            videoSourceForQuality(file, "original"),
-            preferredOriginalAvailable
-              ? "Auto is starting with the faster Pi-local copy while 720p prepares. Use Desktop 4K to stream the original full-resolution file."
-              : "Auto is starting with the faster Pi-local copy while a lighter 720p stream prepares."
+            "p720",
+            videoSourceForQuality(file, "p720"),
+            "Auto selected 720p for this device or connection.",
+            "Pi 1080p/720p mirror",
+            "mirror"
           );
           return;
         }
 
-        applyVideoSource("original", videoSourceForQuality(file, "original"), "Auto prefers 720p here, but it is still preparing. Playing original for now.");
+        applyVideoSource(
+          "original",
+          videoSourceForQuality(file, "original"),
+          "Auto prefers 720p here, but it is still preparing. Playing original for now.",
+          "Original source",
+          "neutral"
+        );
         return;
       }
 
-      applyVideoSource("original", videoSourceForQuality(file, "original"), "Auto selected original quality for this device.");
+      applyVideoSource(
+        "original",
+        videoSourceForQuality(file, "original"),
+        "Auto selected original quality for this device.",
+        "Original source",
+        "neutral"
+      );
     };
 
     qualitySelect.addEventListener("change", () => {
@@ -895,7 +966,7 @@ function openViewer(file) {
     });
 
     qualityLabel.append(qualitySelect);
-    qualityWrap.append(qualityLabel, qualityHint);
+    qualityWrap.append(qualityLabel, sourceBadge, qualityHint);
     elements.viewerBody.append(qualityWrap);
     elements.viewerBody.append(video);
     elements.viewerBody.append(download);

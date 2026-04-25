@@ -22,6 +22,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # Allow reaching the Pi host (where mosquitto is exposed on :1883).
+    # host-gateway resolves to the Docker bridge gateway on Linux.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       HOST: 0.0.0.0
       PORT: 42069
@@ -37,6 +41,7 @@ services:
       OLLAMA_AWAKE_KEEP_ALIVE: "${OLLAMA_AWAKE_KEEP_ALIVE:-5m}"
       OLLAMA_TIMEOUT_MS: "${OLLAMA_TIMEOUT_MS:-120000}"
       SPEEDTEST_BACKGROUND_INTERVAL_MS: "${SPEEDTEST_BACKGROUND_INTERVAL_MS:-0}"
+      ZIGBEE_MQTT_URL: "${ZIGBEE_MQTT_URL:-mqtt://host.docker.internal:1883}"
       GOOGLE_OAUTH_CLIENT_ID: "${GOOGLE_OAUTH_CLIENT_ID:-}"
       GOOGLE_OAUTH_CLIENT_SECRET: "${GOOGLE_OAUTH_CLIENT_SECRET:-}"
       MICROSOFT_OAUTH_CLIENT_ID: "${MICROSOFT_OAUTH_CLIENT_ID:-}"
