@@ -2,6 +2,24 @@
 
 Hearthboard is a self-hosted household calendar and scheduling board you can run on your own Windows machine in Docker and share across your local network.
 
+## Raspberry Pi primary + Windows standby
+
+This repo now includes a Pi-primary deployment pack in [deploy/raspberry-pi](C:\Users\jody4\OneDrive\Documents\New project\deploy\raspberry-pi).
+
+That pack is designed for:
+
+- Raspberry Pi as the always-on primary Hearthboard host
+- Windows PC as the standby backup host
+- `Jody AI` continuing to run only on the Windows PC
+- local 1080p drone copies on the Pi USB drive
+- automatic preference for the Windows desktop's full-resolution drone library whenever that desktop share is reachable
+
+Start with:
+
+- [deploy/raspberry-pi/README.md](C:\Users\jody4\OneDrive\Documents\New project\deploy\raspberry-pi\README.md)
+- [deploy/raspberry-pi/docker-compose.pi.yml](C:\Users\jody4\OneDrive\Documents\New project\deploy\raspberry-pi\docker-compose.pi.yml)
+- [deploy/raspberry-pi/.env.example](C:\Users\jody4\OneDrive\Documents\New project\deploy\raspberry-pi\.env.example)
+
 ## What it includes
 
 - Shared month-view calendar with a focused day agenda
@@ -39,6 +57,12 @@ Then open:
 - `https://YOUR-WINDOWS-IP`
 - `https://YOUR-WINDOWS-IP:42069`
 
+If this Windows machine is being used as the standby backup behind a Raspberry Pi primary, use the standby watchdog instead of the normal always-on launcher:
+
+- [scripts/hearthboard-standby-watchdog.ps1](C:\Users\jody4\OneDrive\Documents\New project\scripts\hearthboard-standby-watchdog.ps1)
+- [scripts/start-hearthboard-standby-watchdog.ps1](C:\Users\jody4\OneDrive\Documents\New project\scripts\start-hearthboard-standby-watchdog.ps1)
+- [scripts/install-hearthboard-standby-autostart.ps1](C:\Users\jody4\OneDrive\Documents\New project\scripts\install-hearthboard-standby-autostart.ps1)
+
 On the first HTTPS run, trust the local certificate on this Windows machine with:
 
 ```powershell
@@ -66,7 +90,8 @@ Then open `http://localhost:42069`.
 
 Hearthboard now includes a dedicated Android shell in [mobile-app](C:\Users\jody4\OneDrive\Documents\New project\mobile-app) that:
 
-- auto-detects your LAN board at `https://192.168.1.118:42069` first
+- can prefer a Raspberry Pi LAN route first
+- can fall back to a Windows-backup LAN route second
 - falls back to `https://jodyrutter-sh.duckdns.org` when you are away from home
 - keeps the mobile session signed in with embedded-app cookies
 - schedules event reminders as on-device Android notifications after the app syncs them
@@ -76,10 +101,17 @@ Hearthboard now includes a dedicated Android shell in [mobile-app](C:\Users\jody
 
 ```powershell
 cd "C:\Users\jody4\OneDrive\Documents\New project\mobile-app"
+Copy-Item .env.example .env
 npm install
 npm run build
 npm run sync:android
 ```
+
+Edit `mobile-app\.env` before building if you want the app to prefer the Pi first:
+
+- `VITE_HEARTHBOARD_PI_URL`
+- `VITE_HEARTHBOARD_WINDOWS_BACKUP_URL`
+- `VITE_HEARTHBOARD_REMOTE_URL`
 
 To produce an APK, this PC also needs an Android SDK installed and reachable through `ANDROID_HOME`, `ANDROID_SDK_ROOT`, or `mobile-app\android\local.properties`.
 
@@ -143,6 +175,7 @@ Application data now lives in PostgreSQL through the named Docker volume `hearth
 - The app seeds only `Jody` into a fresh household database.
 - Update `HOUSEHOLD_NAME` and `APP_TIMEZONE` in [docker-compose.yml](C:\Users\jody4\OneDrive\Documents\New project\docker-compose.yml) if you want different defaults.
 - The Docker setup mounts `E:\Drone`, `D:\Home\Japan-photos`, and `D:\Home\Pictures` as read-only gallery libraries.
+- The server now supports a preferred + fallback media root for a gallery library, which the Pi deployment uses for full-resolution desktop drone media with a local 1080p fallback mirror.
 - Video thumbnails are generated on demand and cached under Hearthboard's own data directory, so the original media library stays read-only.
 - The `Jody AI` tab expects the local model runtime to be running on the Windows host at `http://localhost:11434`, which the Docker container reaches through `http://host.docker.internal:11434`.
 - After installing the local runtime, run [setup-hearthboard-ai.ps1](C:\Users\jody4\OneDrive\Documents\New project\scripts\setup-hearthboard-ai.ps1) to pull `qwen2.5:7b` and create the custom `hearthboard-assistant` model alias.

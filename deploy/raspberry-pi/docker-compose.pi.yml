@@ -1,0 +1,97 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: hearthboard-postgres
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-hearthboard}"
+      POSTGRES_USER: "${POSTGRES_USER:-hearthboard}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in deploy/raspberry-pi/.env}"
+    volumes:
+      - hearthboard-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hearthboard} -d ${POSTGRES_DB:-hearthboard}"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+    restart: unless-stopped
+
+  hearthboard:
+    build:
+      context: ../..
+    container_name: hearthboard
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      HOST: 0.0.0.0
+      PORT: 42069
+      DATA_DIR: /app/data
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-hearthboard}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in deploy/raspberry-pi/.env}@postgres:5432/${POSTGRES_DB:-hearthboard}"
+      APP_TIMEZONE: "${APP_TIMEZONE:-America/Port-au-Prince}"
+      HOUSEHOLD_NAME: "${HOUSEHOLD_NAME:-Hearthboard Household}"
+      TRUST_PROXY_HEADERS: "true"
+      OLLAMA_BASE_URL: "${DESKTOP_OLLAMA_BASE_URL:-http://192.168.1.118:11434}"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-hearthboard-assistant}"
+      OLLAMA_FALLBACK_MODEL: "${OLLAMA_FALLBACK_MODEL:-qwen2.5:7b}"
+      OLLAMA_KEEP_ALIVE: "${OLLAMA_KEEP_ALIVE:-0}"
+      OLLAMA_AWAKE_KEEP_ALIVE: "${OLLAMA_AWAKE_KEEP_ALIVE:-5m}"
+      OLLAMA_TIMEOUT_MS: "${OLLAMA_TIMEOUT_MS:-120000}"
+      SPEEDTEST_BACKGROUND_INTERVAL_MS: "${SPEEDTEST_BACKGROUND_INTERVAL_MS:-0}"
+      GOOGLE_OAUTH_CLIENT_ID: "${GOOGLE_OAUTH_CLIENT_ID:-}"
+      GOOGLE_OAUTH_CLIENT_SECRET: "${GOOGLE_OAUTH_CLIENT_SECRET:-}"
+      MICROSOFT_OAUTH_CLIENT_ID: "${MICROSOFT_OAUTH_CLIENT_ID:-}"
+      MICROSOFT_OAUTH_CLIENT_SECRET: "${MICROSOFT_OAUTH_CLIENT_SECRET:-}"
+      INTEGRATION_TOKEN_ENCRYPTION_KEY: "${INTEGRATION_TOKEN_ENCRYPTION_KEY:-}"
+      INTEGRATION_PUBLIC_ORIGIN: "${INTEGRATION_PUBLIC_ORIGIN:-https://${HEARTHBOARD_PUBLIC_DOMAIN:-jodyrutter-sh.duckdns.org}}"
+      MEDIA_LIBRARY_ROOTS: >-
+        [{"id":"drone","label":"Drone pictures","path":"/libraries/drone-1080p","preferredPath":"/libraries/drone-fullres","fallbackPath":"/libraries/drone-1080p","preferFallbackForVideos":true,"preferredSourceLabel":"Desktop full resolution","fallbackSourceLabel":"Pi 1080p mirror","preferredCheckIntervalMs":300000},{"id":"japan","label":"Japan","path":"/libraries/japan","writable":true},{"id":"general","label":"General","path":"/libraries/general","excludePaths":["Pretty Pictures"],"writable":true},{"id":"phone","label":"Phone","path":"/libraries/phone","authMode":"always","quarantinePath":"/libraries/phone-quarantine","writable":true}]
+    volumes:
+      - hearthboard-data:/app/data
+      - type: bind
+        source: ${PI_DRONE_FULLRES_MOUNT:?Set PI_DRONE_FULLRES_MOUNT in deploy/raspberry-pi/.env}
+        target: /libraries/drone-fullres
+        read_only: true
+      - type: bind
+        source: ${PI_DRONE_MIRROR_DIR:?Set PI_DRONE_MIRROR_DIR in deploy/raspberry-pi/.env}
+        target: /libraries/drone-1080p
+        read_only: true
+      - type: bind
+        source: ${PI_JAPAN_DIR:?Set PI_JAPAN_DIR in deploy/raspberry-pi/.env}
+        target: /libraries/japan
+      - type: bind
+        source: ${PI_GENERAL_DIR:?Set PI_GENERAL_DIR in deploy/raspberry-pi/.env}
+        target: /libraries/general
+      - type: bind
+        source: ${PI_PHONE_DIR:?Set PI_PHONE_DIR in deploy/raspberry-pi/.env}
+        target: /libraries/phone
+      - type: bind
+        source: ${PI_PHONE_QUARANTINE_DIR:?Set PI_PHONE_QUARANTINE_DIR in deploy/raspberry-pi/.env}
+        target: /libraries/phone-quarantine
+    ports:
+      - "127.0.0.1:42070:42069"
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.10-alpine
+    container_name: hearthboard-caddy
+    depends_on:
+      - hearthboard
+    ports:
+      - "80:80"
+      - "443:443"
+      - "42069:443"
+    environment:
+      HEARTHBOARD_LOCAL_SITE_ADDRESSES: "${HEARTHBOARD_LOCAL_SITE_ADDRESSES:-localhost 127.0.0.1 192.168.1.220}"
+      HEARTHBOARD_PUBLIC_DOMAIN: "${HEARTHBOARD_PUBLIC_DOMAIN:-jodyrutter-sh.duckdns.org}"
+      HEARTHBOARD_DEFAULT_SNI: "${HEARTHBOARD_DEFAULT_SNI:-192.168.1.220}"
+    volumes:
+      - ../../Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+
+volumes:
+  hearthboard-postgres:
+  hearthboard-data:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,6 @@
+﻿{
+    "syncedAt":  "2026-04-25T00:44:47.3840372Z",
+    "piSshTarget":  "jodyrutter@192.168.1.220",
+    "remoteExportScript":  "/home/jodyrutter/hearthboard/deploy/raspberry-pi/export-hearthboard-state.sh",
+    "snapshotPath":  "C:\\Users\\jody4\\OneDrive\\Documents\\New project\\scripts\\standby-state\\pi-store.json"
+}

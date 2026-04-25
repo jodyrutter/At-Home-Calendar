@@ -24,7 +24,8 @@ const state = {
   avatarCurrentPath: "",
   avatarFolders: [],
   avatarImages: [],
-  avatarUploading: false
+  avatarUploading: false,
+  integrations: null
 };
 
 // Maximum dimension the client-side resize pass shrinks portraits down to
@@ -68,11 +69,19 @@ const elements = {
   visibilityForm: document.querySelector("#visibility-form"),
   pageGrid: document.querySelector("#page-visibility-grid"),
   libraryGrid: document.querySelector("#library-visibility-grid"),
+  librarySourceSettingsSection: document.querySelector("#library-source-settings"),
+  librarySourceSettingsGrid: document.querySelector("#library-source-settings-grid"),
   userList: document.querySelector("#user-list"),
   visibilityError: document.querySelector("#visibility-error"),
   visibilitySuccess: document.querySelector("#visibility-success"),
   deviceSummary: document.querySelector("#device-summary"),
-  deviceList: document.querySelector("#device-list")
+  deviceList: document.querySelector("#device-list"),
+  connectGoogle: document.querySelector("#connect-google"),
+  connectMicrosoft: document.querySelector("#connect-microsoft"),
+  integrationsList: document.querySelector("#integrations-list"),
+  integrationsNotice: document.querySelector("#integrations-notice"),
+  integrationsError: document.querySelector("#integrations-error"),
+  integrationsSuccess: document.querySelector("#integrations-success")
 };
 
 async function api(path, options = {}) {
@@ -385,6 +394,48 @@ function renderVisibilityGrid(target, items, prefix) {
   });
 }
 
+function renderLibrarySourceSettings(libraries, sourceSettings) {
+  if (!elements.librarySourceSettingsSection || !elements.librarySourceSettingsGrid) {
+    return;
+  }
+
+  const configurableLibraries = (libraries || []).filter((library) => library.hasPreferredSource);
+  elements.librarySourceSettingsSection.hidden = configurableLibraries.length === 0;
+  elements.librarySourceSettingsGrid.innerHTML = "";
+
+  configurableLibraries.forEach((library) => {
+    const stored = sourceSettings?.[library.id];
+    const preferredEnabled = stored?.preferredEnabled !== false;
+
+    const row = document.createElement("label");
+    row.className = "admin-source-toggle";
+    row.innerHTML = `
+      <div class="admin-source-copy">
+        <strong>${escapeHtml(library.label)}</strong>
+        <span class="muted">When enabled, Hearthboard can use ${escapeHtml(library.preferredSourceLabel || "the desktop SMB source")} for original-file access like 4K drone video downloads. When disabled, fast Pi-local playback stays available, and normal photo browsing still follows the live gallery source when it is online.</span>
+      </div>
+    `;
+
+    const toggleWrap = document.createElement("span");
+    toggleWrap.className = "admin-source-toggle-control";
+    toggleWrap.innerHTML = `
+      <input type="checkbox" name="librarySource.${library.id}.preferredEnabled" ${preferredEnabled ? "checked" : ""} />
+      <span>${preferredEnabled ? "Desktop source on" : "Pi mirror only"}</span>
+    `;
+
+    const input = toggleWrap.querySelector("input");
+    const text = toggleWrap.querySelector("span");
+    input?.addEventListener("change", () => {
+      if (text) {
+        text.textContent = input.checked ? "Desktop source on" : "Pi mirror only";
+      }
+    });
+
+    row.append(toggleWrap);
+    elements.librarySourceSettingsGrid.append(row);
+  });
+}
+
 function renderDeviceSummary(summary) {
   if (!elements.deviceSummary) {
     return;
@@ -635,6 +686,7 @@ function render() {
     ];
     renderVisibilityGrid(elements.pageGrid, pages, "page");
     renderVisibilityGrid(elements.libraryGrid, libraries, "library");
+    renderLibrarySourceSettings(libraries, state.account.librarySourceSettings);
     renderUserList(users);
     renderDeviceSummary(state.account.deviceSummary);
     renderDeviceList(devices);
@@ -642,11 +694,194 @@ function render() {
   }
 }
 
+// ---------- Calendar integrations (Google + Outlook) --------------------------
+
+const PROVIDER_LABELS = {
+  google: "Google Calendar",
+  microsoft: "Outlook Calendar"
+};
+const PROVIDER_BADGES = { google: "G", microsoft: "O" };
+
+function formatRelativeTime(iso) {
+  if (!iso) return "never";
+  const then = new Date(iso).getTime();
+  if (!Number.isFinite(then)) return "never";
+  const secs = Math.round((Date.now() - then) / 1000);
+  if (secs < 60) return "just now";
+  if (secs < 3600) return `${Math.floor(secs / 60)} min ago`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)} hr ago`;
+  return `${Math.floor(secs / 86400)} day(s) ago`;
+}
+
+function renderIntegrations() {
+  if (!elements.integrationsList) return;
+  const data = state.integrations;
+  if (!data) {
+    elements.integrationsList.innerHTML = "";
+    return;
+  }
+
+  // Disable connect buttons when the server hasn't been configured with
+  // OAuth credentials yet, or the encryption key is missing.
+  const googleReady = data.providers?.google?.configured && data.encryptionReady;
+  const microsoftReady = data.providers?.microsoft?.configured && data.encryptionReady;
+  if (elements.connectGoogle) elements.connectGoogle.disabled = !googleReady;
+  if (elements.connectMicrosoft) elements.connectMicrosoft.disabled = !microsoftReady;
+
+  if (elements.integrationsNotice) {
+    if (!data.encryptionReady) {
+      elements.integrationsNotice.hidden = false;
+      elements.integrationsNotice.textContent =
+        "Token encryption key is missing on the server. See INTEGRATIONS-SETUP.md for how to generate one.";
+    } else if (!googleReady && !microsoftReady) {
+      elements.integrationsNotice.hidden = false;
+      elements.integrationsNotice.textContent =
+        "Neither Google nor Microsoft OAuth credentials are configured yet. See INTEGRATIONS-SETUP.md.";
+    } else if (!googleReady) {
+      elements.integrationsNotice.hidden = false;
+      elements.integrationsNotice.textContent =
+        "Google OAuth credentials are not yet configured. See INTEGRATIONS-SETUP.md.";
+    } else if (!microsoftReady) {
+      elements.integrationsNotice.hidden = false;
+      elements.integrationsNotice.textContent =
+        "Microsoft OAuth credentials are not yet configured. See INTEGRATIONS-SETUP.md.";
+    } else {
+      elements.integrationsNotice.hidden = true;
+      elements.integrationsNotice.textContent = "";
+    }
+  }
+
+  const list = Array.isArray(data.integrations) ? data.integrations : [];
+  if (!list.length) {
+    elements.integrationsList.innerHTML =
+      '<p class="muted">No calendars connected yet. Use the buttons above to link Google or Outlook.</p>';
+    return;
+  }
+
+  elements.integrationsList.innerHTML = list
+    .map((integration) => {
+      const label = PROVIDER_LABELS[integration.provider] || integration.provider;
+      const badge = PROVIDER_BADGES[integration.provider] || "?";
+      const calendarChips = (integration.calendars || [])
+        .map((cal) => `<span class="integration-calendar">${escapeHtml(cal.summary)}</span>`)
+        .join("");
+      const errorLine = integration.lastSyncError?.message
+        ? `<p class="form-error">Last sync failed: ${escapeHtml(integration.lastSyncError.message)}</p>`
+        : "";
+      const summary = integration.lastSyncSummary
+        ? ` • ${integration.lastSyncSummary.upserted} updated, ${integration.lastSyncSummary.deleted} removed`
+        : "";
+
+      return `
+        <article class="integration-item" data-integration-id="${escapeHtml(integration.id)}">
+          <div class="integration-head">
+            <span class="integration-badge integration-badge-${escapeHtml(integration.provider)}" aria-hidden="true">${badge}</span>
+            <div class="integration-meta">
+              <strong>${escapeHtml(label)}</strong>
+              <span class="muted">${escapeHtml(integration.accountEmail || integration.accountDisplayName || "")}</span>
+              <span class="muted">Last sync: ${escapeHtml(formatRelativeTime(integration.lastSyncAt))}${escapeHtml(summary)}</span>
+            </div>
+            <div class="integration-actions">
+              <button class="button button-secondary" type="button" data-integration-sync="${escapeHtml(integration.id)}">Sync now</button>
+              <button class="button button-secondary" type="button" data-integration-disconnect="${escapeHtml(integration.id)}">Disconnect</button>
+            </div>
+          </div>
+          <div class="integration-calendars">${calendarChips || '<span class="muted">No calendars discovered yet.</span>'}</div>
+          ${errorLine}
+        </article>
+      `;
+    })
+    .join("");
+}
+
+async function loadIntegrations() {
+  try {
+    state.integrations = await api("/api/integrations");
+  } catch (error) {
+    state.integrations = null;
+    if (elements.integrationsError) {
+      showMessage(elements.integrationsError, error.message);
+    }
+  }
+  renderIntegrations();
+}
+
+async function handleIntegrationSync(id) {
+  if (!id) return;
+  clearMessage(elements.integrationsError);
+  clearMessage(elements.integrationsSuccess);
+  try {
+    const payload = await api(`/api/integrations/${encodeURIComponent(id)}/sync-now`, {
+      method: "POST"
+    });
+    showMessage(
+      elements.integrationsSuccess,
+      `Synced: ${payload.result?.upserted ?? 0} updated, ${payload.result?.deleted ?? 0} removed.`
+    );
+  } catch (error) {
+    showMessage(elements.integrationsError, error.message);
+  }
+  await loadIntegrations();
+}
+
+async function handleIntegrationDisconnect(id) {
+  if (!id) return;
+  if (!window.confirm("Disconnect this calendar? Events imported from it will be removed from Hearthboard.")) {
+    return;
+  }
+  clearMessage(elements.integrationsError);
+  clearMessage(elements.integrationsSuccess);
+  try {
+    await api(`/api/integrations/${encodeURIComponent(id)}`, { method: "DELETE" });
+    showMessage(elements.integrationsSuccess, "Calendar disconnected.");
+  } catch (error) {
+    showMessage(elements.integrationsError, error.message);
+  }
+  await loadIntegrations();
+}
+
+if (elements.connectGoogle) {
+  elements.connectGoogle.addEventListener("click", () => {
+    window.location.href = "/api/integrations/google/start?returnTo=/account";
+  });
+}
+if (elements.connectMicrosoft) {
+  elements.connectMicrosoft.addEventListener("click", () => {
+    window.location.href = "/api/integrations/microsoft/start?returnTo=/account";
+  });
+}
+if (elements.integrationsList) {
+  elements.integrationsList.addEventListener("click", (event) => {
+    const syncId = event.target?.dataset?.integrationSync;
+    const disconnectId = event.target?.dataset?.integrationDisconnect;
+    if (syncId) {
+      handleIntegrationSync(syncId);
+    } else if (disconnectId) {
+      handleIntegrationDisconnect(disconnectId);
+    }
+  });
+}
+
+// If we just came back from an OAuth callback, the server appends ?calendar=connected.
+(function showCalendarConnectedToast() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("calendar") === "connected" && elements.integrationsSuccess) {
+      showMessage(elements.integrationsSuccess, "Calendar connected! First sync is underway.");
+      params.delete("calendar");
+      const query = params.toString();
+      const next = window.location.pathname + (query ? `?${query}` : "");
+      window.history.replaceState(null, "", next);
+    }
+  } catch {}
+})();
+
 async function loadAccount() {
   state.account = await api("/api/account");
   render();
   renderAvatarPreview(state.account?.user?.avatar || null);
   window.dispatchEvent(new Event("hearthboard:nav-refresh"));
+  loadIntegrations();
 }
 
 elements.refresh?.addEventListener("click", () => {
@@ -759,6 +994,7 @@ elements.visibilityForm?.addEventListener("submit", async (event) => {
   const formData = new FormData(elements.visibilityForm);
   const pageVisibility = {};
   const libraryVisibility = {};
+  const librarySourceSettings = {};
 
   for (const [key, value] of formData.entries()) {
     const [scope, id, audience] = String(key).split(".");
@@ -768,6 +1004,19 @@ elements.visibilityForm?.addEventListener("submit", async (event) => {
     } else if (scope === "library") {
       libraryVisibility[id] = libraryVisibility[id] || {};
       libraryVisibility[id][audience] = value;
+    } else if (scope === "librarySource") {
+      librarySourceSettings[id] = librarySourceSettings[id] || {};
+      librarySourceSettings[id][audience] = value === "on";
+    }
+  }
+
+  for (const library of state.account?.libraries || []) {
+    if (!library.hasPreferredSource) {
+      continue;
+    }
+    librarySourceSettings[library.id] = librarySourceSettings[library.id] || {};
+    if (typeof librarySourceSettings[library.id].preferredEnabled !== "boolean") {
+      librarySourceSettings[library.id].preferredEnabled = false;
     }
   }
 
@@ -776,13 +1025,17 @@ elements.visibilityForm?.addEventListener("submit", async (event) => {
       method: "PATCH",
       body: JSON.stringify({
         pageVisibility,
-        libraryVisibility
+        libraryVisibility,
+        librarySourceSettings
       })
     });
     state.account.pageVisibility = payload.pageVisibility;
+    state.account.librarySourceSettings = payload.librarySourceSettings || state.account.librarySourceSettings;
     state.account.libraries = state.account.libraries.map((library) => ({
       ...library,
-      visibility: payload.libraryVisibility[library.id] || library.visibility
+      visibility: payload.libraryVisibility[library.id] || library.visibility,
+      preferredSourceEnabled:
+        payload.librarySourceSettings?.[library.id]?.preferredEnabled ?? library.preferredSourceEnabled
     }));
     render();
     showMessage(elements.visibilitySuccess, "Visibility settings saved.");

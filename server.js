@@ -1,12 +1,34 @@
-import express from "express";
+﻿import express from "express";
 import compression from "compression";
 import { copyFile, mkdir, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { Readable } from "node:stream";
 import { nanoid } from "nanoid";
 import { createPersistentStore } from "./store.js";
+import {
+  generatePkcePair,
+  issueState,
+  consumeState,
+  resolveRedirectUri
+} from "./integrations/oauth.js";
+import { encryptSecret, decryptSecret, isEncryptionConfigured } from "./integrations/crypto.js";
+import * as googleIntegration from "./integrations/google.js";
+import * as microsoftIntegration from "./integrations/microsoft.js";
+import {
+  syncIntegration,
+  syncAllIntegrations,
+  startIntegrationScheduler
+} from "./integrations/sync.js";
+import {
+  encryptMessageBody,
+  decryptMessageBody,
+  tryDecryptMessageBody,
+  isMessagingEncryptionConfigured
+} from "./messaging/crypto.js";
+import { runInternetSpeedTest } from "./speedtest/runner.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,11 +41,12 @@ const DB_FILE_NAME = "store.json";
 const DATABASE_URL = String(process.env.DATABASE_URL || "").trim();
 const THUMBNAIL_DIR = path.join(DATA_DIR, "media-thumbs");
 const VIDEO_PROXY_DIR = path.join(DATA_DIR, "video-proxies");
-// Uploaded account portraits live inside public/ so the existing static
-// middleware serves them directly. Client uploads are resized to <=512px edge
-// and kept well under 1 MB each, but we still enforce an upload cap
-// server-side as a defense-in-depth check.
-const AVATARS_DIR = path.join(__dirname, "public", "avatars");
+// Uploaded account portraits live under DATA_DIR/avatars so they survive
+// container rebuilds (public/ is part of the container image and gets reset
+// on every rebuild). A dedicated /avatars/* express route serves them.
+// Client uploads are resized to <=512px edge and kept well under 1 MB each,
+// but we still enforce an upload cap server-side as a defense-in-depth check.
+const AVATARS_DIR = path.join(DATA_DIR, "avatars");
 const AVATAR_MAX_BYTES = 1_500_000; // 1.5 MB hard cap on the wire
 const AVATAR_ALLOWED_MIMES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const APP_TIMEZONE = process.env.APP_TIMEZONE || "America/Port-au-Prince";
@@ -64,6 +87,19 @@ const EVENT_NOTIFICATION_ANNOY_LEVEL_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 const EVENT_NOTIFICATION_MAX_AI_MESSAGES = 10;
 const EVENT_NOTIFICATION_ANNOY_WINDOW_MINUTES = 120;
 const MOBILE_REMINDER_LOOKAHEAD_DAYS = 45;
+const SPEEDTEST_PUSH_SECRET = String(
+  process.env.SPEEDTEST_PUSH_SECRET || process.env.INTEGRATION_TOKEN_ENCRYPTION_KEY || ""
+).trim();
+const SPEEDTEST_BACKGROUND_INTERVAL_MS = normalizePositiveInteger(
+  process.env.SPEEDTEST_BACKGROUND_INTERVAL_MS,
+  5 * 60_000
+);
+const SPEEDTEST_BACKGROUND_INITIAL_DELAY_MS = normalizePositiveInteger(
+  process.env.SPEEDTEST_BACKGROUND_INITIAL_DELAY_MS,
+  45_000
+);
+const SPEEDTEST_BACKGROUND_RUNNER_LABEL =
+  String(process.env.SPEEDTEST_BACKGROUND_RUNNER_LABEL || "Hearthboard Pi").trim() || "Hearthboard Pi";
 const VISIBILITY_RANKS = new Map([
   ["public", 0],
   ["trusted", 1],
@@ -97,6 +133,7 @@ const supportExtensions = new Set([".txt", ".gz", ".json", ".js", ".css"]);
 const DEFAULT_MEDIA_PAGE_SIZE = 48;
 const MAX_MEDIA_PAGE_SIZE = 120;
 const MEDIA_INDEX_TTL_MS = 5 * 60 * 1000;
+const MEDIA_ROOT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 
 function defaultMediaLibraries() {
   if (process.platform === "win32") {
@@ -121,7 +158,13 @@ function parseMediaLibraries() {
       .map((entry) => ({
         id: String(entry.id || "").trim(),
         label: String(entry.label || entry.id || "").trim(),
-        path: String(entry.path || "").trim(),
+        path: String(entry.path || entry.fallbackPath || entry.preferredPath || "").trim(),
+        preferredPath: String(entry.preferredPath || "").trim(),
+        fallbackPath: String(entry.fallbackPath || "").trim(),
+        preferredSourceLabel: String(entry.preferredSourceLabel || "").trim(),
+        fallbackSourceLabel: String(entry.fallbackSourceLabel || "").trim(),
+        preferredCheckIntervalMs: normalizePositiveInteger(entry.preferredCheckIntervalMs, MEDIA_ROOT_CHECK_INTERVAL_MS),
+        preferFallbackForVideos: normalizeBoolean(entry.preferFallbackForVideos),
         remoteProtected: normalizeBoolean(entry.remoteProtected),
         authMode: String(entry.authMode || "").trim().toLowerCase(),
         quarantinePath: String(entry.quarantinePath || "").trim(),
@@ -132,7 +175,7 @@ function parseMediaLibraries() {
               .filter(Boolean)
           : []
       }))
-      .filter((entry) => entry.id && entry.label && entry.path);
+      .filter((entry) => entry.id && entry.label && (entry.path || entry.preferredPath || entry.fallbackPath));
   } catch {
     return defaultMediaLibraries();
   }
@@ -140,6 +183,7 @@ function parseMediaLibraries() {
 
 const mediaLibraries = parseMediaLibraries();
 const mediaLibraryMap = new Map(mediaLibraries.map((library) => [library.id, library]));
+const mediaRootStateCache = new Map();
 
 function seedMembers() {
   return [{ id: nanoid(), name: "Jody", role: "", color: "#2473eb" }];
@@ -167,6 +211,7 @@ function defaultData() {
       users: [],
       sessions: [],
       devices: [],
+      librarySourceSettings: {},
       notificationDismissals: [],
       completedEvents: [],
       localAi: {
@@ -224,9 +269,41 @@ function defaultLibraryVisibility() {
   return Object.fromEntries(mediaLibraries.map((library) => [library.id, defaultLibraryVisibilityEntry(library)]));
 }
 
+function defaultLibrarySourceSettingsEntry(library) {
+  return {
+    preferredEnabled: Boolean(library?.preferredPath)
+  };
+}
+
+function defaultLibrarySourceSettings() {
+  return Object.fromEntries(
+    mediaLibraries
+      .filter((library) => library.preferredPath)
+      .map((library) => [library.id, defaultLibrarySourceSettingsEntry(library)])
+  );
+}
+
+function normalizeLibrarySourceSettingsEntry(library, value) {
+  const fallback = defaultLibrarySourceSettingsEntry(library);
+  if (!library?.preferredPath) {
+    return { preferredEnabled: false };
+  }
+  if (!value || typeof value !== "object") {
+    return { ...fallback };
+  }
+  return {
+    preferredEnabled: value.preferredEnabled !== false
+  };
+}
+
 function normalizeVisibilityLevel(value, fallback = "public") {
   const normalized = String(value || "").trim().toLowerCase();
   return VISIBILITY_OPTIONS.has(normalized) ? normalized : fallback;
+}
+
+function normalizePositiveInteger(value, fallback) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function normalizeVisibilityRule(rule, fallbackRule) {
@@ -278,7 +355,7 @@ let reminderDraftProcessingPromise = null;
 let reminderDraftKickScheduled = false;
 
 // ---- db write coalescer ---------------------------------------------------
-// The old behaviour was `await db.write()` on every mutation — a full-file
+// The old behaviour was `await db.write()` on every mutation â€” a full-file
 // rewrite that dominates latency on hot paths like dismissing a reminder or
 // logging a media view. `requestDbWrite()` flips a dirty flag and debounces
 // the flush so a burst of writes collapses into one disk hit. Critical paths
@@ -286,7 +363,7 @@ let reminderDraftKickScheduled = false;
 // `flushDbWrite()` directly.
 //
 // We also wrap `db.write` itself with a promise chain so concurrent writes
-// from the coalescer and from direct-await callers are serialized — neither
+// from the coalescer and from direct-await callers are serialized â€” neither
 // the lowdb JSON adapter nor the Postgres adapter guarantee safe concurrent
 // writes, so we do it at the app level.
 const originalDbWrite = db.write.bind(db);
@@ -312,7 +389,7 @@ let dbWriteFirstDirtyAt = 0;
 let dbWriteInFlight = null;
 
 async function performDbWrite() {
-  // Another flush may have been requested while this one awaits disk — loop
+  // Another flush may have been requested while this one awaits disk â€” loop
   // until we've drained the dirty flag so we never leave pending state.
   while (dbWriteDirty) {
     dbWriteDirty = false;
@@ -331,7 +408,7 @@ async function performDbWrite() {
 
 function kickDbWrite() {
   if (dbWriteInFlight) {
-    // Already writing — dirty flag plus the while-loop in performDbWrite
+    // Already writing â€” dirty flag plus the while-loop in performDbWrite
     // guarantees the new changes will be picked up before it resolves.
     return dbWriteInFlight;
   }
@@ -406,6 +483,60 @@ if (!Array.isArray(db.data.bulletins)) {
   db.data.bulletins = [];
 }
 
+// External calendar connections (Google, Microsoft). Each entry stores
+// encrypted OAuth tokens + sync metadata. See integrations/sync.js.
+if (!Array.isArray(db.data.integrations)) {
+  db.data.integrations = [];
+}
+
+// Short-lived OAuth state tokens (PKCE + CSRF). Pruned on access by
+// integrations/oauth.js â€” we keep them here so they survive a server
+// restart mid-flow rather than losing the user's auth.
+if (!Array.isArray(db.data.oauthStates)) {
+  db.data.oauthStates = [];
+}
+
+// Encrypted household messaging. Conversations are either the single
+// household-wide channel (type "household") or 1:1 DMs (type "dm",
+// memberIds is a two-element sorted array of user ids). Messages are
+// stored as AES-256-GCM ciphertext in the `body` field â€” plaintext
+// never lands on disk. See messaging/crypto.js.
+if (!Array.isArray(db.data.conversations)) {
+  db.data.conversations = [];
+}
+if (!Array.isArray(db.data.messages)) {
+  db.data.messages = [];
+}
+// Per-user read cursors: { [conversationId]: { [userId]: lastReadAt ISO } }.
+// A message is "unread" for a user when its createdAt is after that
+// user's cursor for the conversation.
+if (!db.data.messageReads || typeof db.data.messageReads !== "object") {
+  db.data.messageReads = {};
+}
+// Rolling speed-test history. Each entry:
+//   { id, ts (ISO), downloadMbps, uploadMbps, latencyMs, userId?, client? }
+// We trim anything older than SPEEDTEST_RETENTION_DAYS on every insert, so
+// the list stays bounded even across long uptimes.
+if (!Array.isArray(db.data.speedtestResults)) {
+  db.data.speedtestResults = [];
+}
+
+// Ensure the household channel exists exactly once on boot.
+(function ensureHouseholdChannel() {
+  const existing = db.data.conversations.find((c) => c && c.type === "household");
+  if (existing) return;
+  const nowIso = new Date().toISOString();
+  db.data.conversations.push({
+    id: nanoid(),
+    type: "household",
+    memberIds: null, // household = everyone; null means "all users"
+    title: "Household",
+    createdAt: nowIso,
+    updatedAt: nowIso,
+    lastMessageAt: null
+  });
+})();
+
 if (!db.data.mediaViews || typeof db.data.mediaViews !== "object") {
   db.data.mediaViews = {};
 }
@@ -476,6 +607,10 @@ if (!db.data.security.libraryVisibility || typeof db.data.security.libraryVisibi
   db.data.security.libraryVisibility = defaultLibraryVisibility();
 }
 
+if (!db.data.security.librarySourceSettings || typeof db.data.security.librarySourceSettings !== "object") {
+  db.data.security.librarySourceSettings = defaultLibrarySourceSettings();
+}
+
 for (const library of mediaLibraries) {
   const stored = normalizeVisibilityRule(
     db.data.security.libraryVisibility[library.id],
@@ -488,6 +623,15 @@ for (const library of mediaLibraries) {
     stored,
     libraryVisibilityFloor(library)
   );
+
+  if (library.preferredPath) {
+    db.data.security.librarySourceSettings[library.id] = normalizeLibrarySourceSettingsEntry(
+      library,
+      db.data.security.librarySourceSettings[library.id]
+    );
+  } else {
+    delete db.data.security.librarySourceSettings[library.id];
+  }
 }
 
 for (const event of db.data.events) {
@@ -755,7 +899,7 @@ function synchronizeMembersWithUsers() {
 
 // Upper bounds that match (and slightly exceed) the maxlength attributes on
 // the matching form controls in public/event-studio.html. The server owns the
-// contract here — a crafted client can always bypass HTML maxlength — so we
+// contract here â€” a crafted client can always bypass HTML maxlength â€” so we
 // re-enforce it. These also keep a malicious user from stuffing arbitrarily
 // huge payloads into the store just to make other users' pages slow to render.
 const EVENT_TITLE_MAX_LEN = 200;
@@ -871,7 +1015,7 @@ function snapshot(request = null) {
     })),
     annoyLevelOptions: EVENT_NOTIFICATION_ANNOY_LEVEL_OPTIONS.map((level) => ({
       level,
-      label: level === 1 ? "1 • Gentle nudge" : level === 10 ? "10 • Maximum chaos" : `${level} • Level ${level}`
+      label: level === 1 ? "1 â€¢ Gentle nudge" : level === 10 ? "10 â€¢ Maximum chaos" : `${level} â€¢ Level ${level}`
     })),
     storage: {
       driver: db.driver
@@ -1085,7 +1229,7 @@ function notificationFeedForUser(user) {
       perEvent.set(entry.eventId, entry);
       continue;
     }
-    // Both same status — keep the earlier scheduled one (allEntries is sorted).
+    // Both same status â€” keep the earlier scheduled one (allEntries is sorted).
   }
 
   // 3. Count suppressed siblings so the UI can say "and N more reminders
@@ -1299,7 +1443,7 @@ function reminderFallbackMessage(event, notifications, offsetMinutes, sequenceNu
     bodyParts.unshift(notificationOffsetLabel(offsetMinutes));
   }
   if (notifications.annoyMode) {
-    bodyParts.push(`Annoy level ${normalizeNotificationAnnoyLevel(notifications.annoyLevel, 5)} • ping ${sequenceNumber}/${totalNotifications}`);
+    bodyParts.push(`Annoy level ${normalizeNotificationAnnoyLevel(notifications.annoyLevel, 5)} â€¢ ping ${sequenceNumber}/${totalNotifications}`);
   }
 
   return {
@@ -1641,10 +1785,36 @@ function readCookies(request) {
       continue;
     }
 
-    cookies[key] = decodeURIComponent(value);
+    try {
+      cookies[key] = decodeURIComponent(value);
+    } catch {
+      cookies[key] = value;
+    }
   }
 
   return cookies;
+}
+
+function normalizeInternalPath(value, fallback = "/") {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return fallback;
+  }
+
+  try {
+    const parsed = new URL(raw, "http://hearthboard.local");
+    if (parsed.origin !== "http://hearthboard.local") {
+      return fallback;
+    }
+
+    if (!/^\/(?!\/)/.test(parsed.pathname || "/")) {
+      return fallback;
+    }
+
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return fallback;
+  }
 }
 
 function forwardedHost(request) {
@@ -1719,7 +1889,7 @@ function requestIsSecure(request) {
   return Boolean(request.socket?.encrypted);
 }
 
-function requestWantsMobileCookies(request) {
+function requestLooksLikeMobileShell(request) {
   if (String(request.headers["x-hearthboard-mobile-app"] || "").trim() === "1") {
     return true;
   }
@@ -1743,6 +1913,10 @@ function requestWantsMobileCookies(request) {
   }
 }
 
+function requestWantsMobileCookies(request) {
+  return String(request.headers["x-hearthboard-mobile-app"] || "").trim() === "1";
+}
+
 function authCookieSameSite(request) {
   if (requestIsSecure(request) && requestWantsMobileCookies(request)) {
     return "None";
@@ -1753,12 +1927,84 @@ function authCookieSameSite(request) {
 
 function loginRedirectUrl(request, nextPath) {
   const params = new URLSearchParams();
-  params.set("next", nextPath);
-  if (requestWantsMobileCookies(request)) {
+  params.set("next", normalizeInternalPath(nextPath, "/"));
+  if (requestLooksLikeMobileShell(request)) {
     params.set("mobileApp", "1");
   }
 
   return `/login?${params.toString()}`;
+}
+
+function requestOriginHeader(request) {
+  const origin = String(request.headers.origin || "").trim();
+  if (!origin) {
+    return "";
+  }
+
+  try {
+    return new URL(origin).origin;
+  } catch {
+    return "";
+  }
+}
+
+function requestRefererOrigin(request) {
+  const referer = String(request.headers.referer || "").trim();
+  if (!referer) {
+    return "";
+  }
+
+  try {
+    return new URL(referer).origin;
+  } catch {
+    return "";
+  }
+}
+
+function canonicalRequestOrigin(request) {
+  const host = requestHostname(request);
+  if (!host) {
+    return "";
+  }
+
+  return `${requestIsSecure(request) ? "https" : "http"}://${host}`;
+}
+
+function requestRequiresSameOriginProtection(request) {
+  return !["GET", "HEAD", "OPTIONS"].includes(String(request.method || "GET").toUpperCase());
+}
+
+function speedtestPushToken() {
+  if (!SPEEDTEST_PUSH_SECRET) {
+    return "";
+  }
+
+  return createHash("sha256")
+    .update("hearthboard-speedtest-push\0")
+    .update(SPEEDTEST_PUSH_SECRET)
+    .digest("hex");
+}
+
+function requestHasValidSpeedtestPushKey(request) {
+  const header = String(request.headers["x-hearthboard-speedtest-key"] || "").trim();
+  const expected = speedtestPushToken();
+  if (!header || !expected || header.length !== expected.length) {
+    return false;
+  }
+
+  try {
+    return timingSafeEqual(Buffer.from(header, "utf8"), Buffer.from(expected, "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+function requestCanBypassSameOriginProtection(request) {
+  if (requestIsLocalMachine(request) || String(request.headers["x-hearthboard-mobile-app"] || "").trim() === "1") {
+    return true;
+  }
+
+  return request.path === "/api/speedtest/results" && requestHasValidSpeedtestPushKey(request);
 }
 
 function setAuthCookie(request, response, token, remembered = false) {
@@ -1794,7 +2040,7 @@ function setDeviceCookie(request, response, deviceId) {
     `${DEVICE_COOKIE}=${encodeURIComponent(deviceId)}`,
     "Path=/",
     "HttpOnly",
-    `SameSite=${authCookieSameSite(request)}`,
+    `SameSite=${requestIsSecure(request) && requestLooksLikeMobileShell(request) ? "None" : "Lax"}`,
     `Max-Age=${Math.floor(DEVICE_COOKIE_TTL_MS / 1000)}`
   ];
   if (requestIsSecure(request)) {
@@ -1879,7 +2125,7 @@ function requestIsLocalMachine(request) {
   // Host or X-Forwarded-For headers it claims.
   //
   // Requests that reach this process without the edge marker came in
-  // directly against the container's listener — which is only reachable
+  // directly against the container's listener â€” which is only reachable
   // from the host's loopback (Docker publishes port 42070 on 127.0.0.1).
   // That is the tray script and any other on-machine tooling.
   const edgeMarker = String(request.headers["x-hearthboard-edge"] || "").trim().toLowerCase();
@@ -1891,6 +2137,17 @@ function requestIsLocalMachine(request) {
 }
 
 function requestCanSelfRegister(request) {
+  const forwardedHostHeader = forwardedHost(request);
+  const forwardedIp = forwardedClientIp(request);
+
+  // If proxy headers are present, honor the original client context instead
+  // of the loopback hop that delivered the request to this process. That
+  // keeps on-box registration working for direct localhost access, but blocks
+  // remote requests that arrive with public forwarded host/IP metadata.
+  if (forwardedHostHeader || forwardedIp) {
+    return hostLooksLocal(requestHostname(request)) || ipLooksPrivate(forwardedIp);
+  }
+
   return requestIsLocalMachine(request) || ipLooksPrivate(requestClientIp(request));
 }
 
@@ -1966,7 +2223,7 @@ async function trackDeviceRequest(request, response) {
       usernames: user ? [user.username] : []
     };
     devices().push(device);
-    // Device tracking runs on every request — debounce the write so a burst
+    // Device tracking runs on every request â€” debounce the write so a burst
     // of navigations collapses into one disk hit.
     requestDbWrite();
     return;
@@ -1988,7 +2245,7 @@ async function trackDeviceRequest(request, response) {
   device.anonymousVisitCount = Math.max(0, Number.parseInt(String(device.anonymousVisitCount || "0"), 10) || 0) + (user ? 0 : 1);
   device.usernames = [...nextUsernames];
 
-  // Same rationale — every page load touches this path.
+  // Same rationale â€” every page load touches this path.
   requestDbWrite();
 }
 
@@ -2144,6 +2401,7 @@ function isPublicRequestPath(requestPath) {
     requestPath === "/gallery" ||
     requestPath === "/login" ||
     requestPath === "/access" ||
+    requestPath === "/stats" ||
     requestPath === "/favicon.svg" ||
     requestPath.startsWith("/media/") ||
     requestPath.startsWith("/media-thumb/") ||
@@ -2152,6 +2410,7 @@ function isPublicRequestPath(requestPath) {
     requestPath.startsWith("/api/media/") ||
     requestPath.startsWith("/api/auth/") ||
     requestPath.startsWith("/api/session/") ||
+    requestPath.startsWith("/api/speedtest/") ||
     isAssetPath(requestPath)
   );
 }
@@ -2263,10 +2522,21 @@ function requestCanQuarantineLibrary(request, library) {
 
 function mediaLibrarySummaryForRequest(request, library) {
   const visibility = libraryVisibility(library);
+  const rootState = deriveMediaLibraryRootStateFromCache(library);
   return {
     id: library.id,
     label: library.label,
     visibility,
+    source: rootState
+      ? {
+          key: rootState.activeKey,
+          label: rootState.activeLabel,
+          preferredAvailable: rootState.preferredAvailable,
+          preferredEnabled: rootState.preferredEnabled !== false,
+          preferredError: rootState.preferredError,
+          checkedAt: new Date(rootState.checkedAt).toISOString()
+        }
+      : null,
     canQuarantine: requestCanQuarantineLibrary(request, library),
     canMoveMedia: requestCanMoveMediaLibrary(request, library),
     moveTargets: requestIsAdmin(request)
@@ -3193,8 +3463,237 @@ function invalidateMediaLibraryCache(libraryId) {
   pendingMediaIndexJobs.delete(libraryId);
 }
 
+function invalidateMediaLibraryRootCache(libraryId) {
+  mediaRootStateCache.delete(libraryId);
+}
+
+function mediaLibraryPreferredSourceEnabled(library) {
+  if (!library?.preferredPath) {
+    return false;
+  }
+  return db.data.security.librarySourceSettings?.[library.id]?.preferredEnabled !== false;
+}
+
+function mediaLibraryRootCandidates(library) {
+  const seen = new Set();
+  const candidates = [];
+
+  const addCandidate = (key, candidatePath, label, priority) => {
+    const normalizedPath = String(candidatePath || "").trim();
+    if (!normalizedPath) {
+      return;
+    }
+
+    const resolvedPath = path.resolve(normalizedPath);
+    if (seen.has(resolvedPath)) {
+      return;
+    }
+
+    seen.add(resolvedPath);
+    candidates.push({
+      key,
+      path: resolvedPath,
+      label: label || library.label,
+      priority
+    });
+  };
+
+  addCandidate("preferred", library.preferredPath, library.preferredSourceLabel || "Desktop full resolution", 0);
+  addCandidate(
+    library.preferredPath ? "fallback" : "primary",
+    library.fallbackPath || library.path,
+    library.preferredPath
+      ? (library.fallbackSourceLabel || "Pi local mirror")
+      : library.label,
+    1
+  );
+
+  return candidates.sort((left, right) => left.priority - right.priority);
+}
+
+function mediaLibrarySupportsHybridRoots(library) {
+  return mediaLibraryRootCandidates(library).length > 1;
+}
+
+function deriveMediaLibraryRootStateFromCache(library) {
+  const candidates = mediaLibraryRootCandidates(library);
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const preferred = candidates.find((candidate) => candidate.key === "preferred") || null;
+  const fallback = candidates.find((candidate) => candidate.key !== "preferred") || preferred || candidates[0];
+  const preferredEnabled = mediaLibraryPreferredSourceEnabled(library);
+
+  if (!mediaLibrarySupportsHybridRoots(library)) {
+    return {
+      libraryId: library.id,
+      checkedAt: Date.now(),
+      activeKey: candidates[0].key,
+      activePath: candidates[0].path,
+      activeLabel: candidates[0].label,
+      preferredAvailable: Boolean(preferred),
+      preferredEnabled,
+      preferredError: preferred ? null : "No preferred media root configured."
+    };
+  }
+
+  const cached = mediaRootStateCache.get(library.id);
+  if (cached) {
+    return cached;
+  }
+
+  return {
+    libraryId: library.id,
+    checkedAt: 0,
+    activeKey: fallback.key,
+    activePath: fallback.path,
+    activeLabel: fallback.label,
+    preferredAvailable: false,
+    preferredEnabled,
+    preferredError: preferredEnabled ? "Preferred media root status unknown." : "Preferred source access is disabled."
+  };
+}
+
+async function resolveMediaLibraryRootState(library, { forceRefresh = false } = {}) {
+  const candidates = mediaLibraryRootCandidates(library);
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const preferred = candidates.find((candidate) => candidate.key === "preferred") || null;
+  const fallback = candidates.find((candidate) => candidate.key !== "preferred") || preferred || candidates[0];
+  const preferredEnabled = mediaLibraryPreferredSourceEnabled(library);
+
+  if (!mediaLibrarySupportsHybridRoots(library)) {
+    return {
+      libraryId: library.id,
+      checkedAt: Date.now(),
+      activeKey: candidates[0].key,
+      activePath: candidates[0].path,
+      activeLabel: candidates[0].label,
+      preferredAvailable: Boolean(preferred),
+      preferredEnabled,
+      preferredError: preferred ? null : "No preferred media root configured."
+    };
+  }
+
+  const checkIntervalMs = normalizePositiveInteger(library.preferredCheckIntervalMs, MEDIA_ROOT_CHECK_INTERVAL_MS);
+  const cached = mediaRootStateCache.get(library.id);
+  if (!forceRefresh && cached && Date.now() - cached.checkedAt < checkIntervalMs) {
+    return cached;
+  }
+
+  let preferredAvailable = false;
+  let preferredError = null;
+
+  if (!preferred?.path) {
+    preferredError = "No preferred media root configured.";
+  } else {
+    try {
+      preferredAvailable = (await stat(preferred.path)).isDirectory();
+      if (!preferredAvailable) {
+        preferredError = "Preferred media root is not a directory.";
+      }
+    } catch (error) {
+      preferredAvailable = false;
+      preferredError = error?.code || error?.message || "Preferred media root is unavailable.";
+    }
+  }
+
+  const nextState = {
+    libraryId: library.id,
+    checkedAt: Date.now(),
+    activeKey: preferredAvailable ? preferred.key : fallback.key,
+    activePath: preferredAvailable ? preferred.path : fallback.path,
+    activeLabel: preferredAvailable ? preferred.label : fallback.label,
+    preferredAvailable,
+    preferredEnabled,
+    preferredError
+  };
+
+  if (cached?.activePath && cached.activePath !== nextState.activePath) {
+    invalidateMediaLibraryCache(library.id);
+  }
+
+  mediaRootStateCache.set(library.id, nextState);
+  return nextState;
+}
+
+function resolveMediaLocationFromRootState(library, rootState, relativePath = "") {
+  if (!rootState?.activePath) {
+    return null;
+  }
+
+  const requestedPath = String(relativePath || "").replaceAll("\\", "/");
+  const segments = requestedPath
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => decodeURIComponent(segment));
+
+  const resolvedPath = path.resolve(rootState.activePath, ...segments);
+  const relativeToRoot = path.relative(rootState.activePath, resolvedPath);
+  if (relativeToRoot.startsWith("..") || path.isAbsolute(relativeToRoot)) {
+    return null;
+  }
+
+  if (isExcludedRelativePath(library, relativeToRoot)) {
+    return null;
+  }
+
+  return {
+    rootState,
+    resolvedPath,
+    relativePath: relativeToRoot.split(path.sep).join("/")
+  };
+}
+
+function resolveMediaLocation(library, relativePath = "", { rootPath = "" } = {}) {
+  const rootState = rootPath
+    ? {
+        libraryId: library.id,
+        checkedAt: Date.now(),
+        activeKey: "explicit",
+        activePath: path.resolve(String(rootPath)),
+        activeLabel: library.label,
+        preferredAvailable: true,
+        preferredError: null
+      }
+    : deriveMediaLibraryRootStateFromCache(library);
+
+  return resolveMediaLocationFromRootState(library, rootState, relativePath);
+}
+
+async function resolveMediaLocationAsync(library, relativePath = "", { forceRefresh = false, rootPath = "" } = {}) {
+  const rootState = rootPath
+    ? {
+        libraryId: library.id,
+        checkedAt: Date.now(),
+        activeKey: "explicit",
+        activePath: path.resolve(String(rootPath)),
+        activeLabel: library.label,
+        preferredAvailable: true,
+        preferredError: null
+      }
+    : await resolveMediaLibraryRootState(library, { forceRefresh });
+
+  return resolveMediaLocationFromRootState(library, rootState, relativePath);
+}
+
 function relativePathFromLibrary(library, absolutePath) {
-  return path.relative(library.path, absolutePath).split(path.sep).join("/");
+  const resolvedAbsolutePath = path.resolve(String(absolutePath || ""));
+  const candidates = mediaLibraryRootCandidates(library)
+    .map((candidate) => candidate.path)
+    .sort((left, right) => right.length - left.length);
+
+  for (const candidatePath of candidates) {
+    const relativePath = path.relative(candidatePath, resolvedAbsolutePath);
+    if (!relativePath.startsWith("..") && !path.isAbsolute(relativePath)) {
+      return relativePath.split(path.sep).join("/");
+    }
+  }
+
+  return path.relative(library.path || candidates[0] || "", resolvedAbsolutePath).split(path.sep).join("/");
 }
 
 function isExcludedRelativePath(library, relativePath = "") {
@@ -3207,26 +3706,15 @@ function isExcludedRelativePath(library, relativePath = "") {
 }
 
 function resolveMediaPath(library, relativePath = "") {
-  const requestedPath = String(relativePath || "").replaceAll("\\", "/");
-  const segments = requestedPath
-    .split("/")
-    .filter(Boolean)
-    .map((segment) => decodeURIComponent(segment));
-
-  const resolved = path.resolve(library.path, ...segments);
-  const relativeToRoot = path.relative(library.path, resolved);
-  if (relativeToRoot.startsWith("..") || path.isAbsolute(relativeToRoot)) {
-    return null;
-  }
-
-  if (isExcludedRelativePath(library, relativeToRoot)) {
-    return null;
-  }
-
-  return resolved;
+  return resolveMediaLocation(library, relativePath)?.resolvedPath || null;
 }
 
 const relativeMediaPath = relativePathFromLibrary;
+
+function normalizeMediaSourcePreference(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return ["auto", "preferred", "fallback"].includes(normalized) ? normalized : "auto";
+}
 
 function buildMediaUrl(libraryId, relativePath) {
   const encodedPath = relativePath
@@ -3283,25 +3771,137 @@ async function fileExists(targetPath) {
   }
 }
 
+async function statMediaLocation(library, relativePath = "", { expectedType = "any", sourcePreference = "auto" } = {}) {
+  const normalizedSourcePreference = normalizeMediaSourcePreference(sourcePreference);
+  const requestedMediaType = mediaTypeForExtension(path.extname(String(relativePath || "")));
+  const preferredEnabled = mediaLibraryPreferredSourceEnabled(library);
+  const resolveFromExplicitRoot = async (rootPath) => {
+    const location = await resolveMediaLocationAsync(library, relativePath, { rootPath });
+    if (!location) {
+      return { error: "Invalid media path.", status: 400 };
+    }
+
+    try {
+      const fileStat = await stat(location.resolvedPath);
+      if (expectedType === "file" && !fileStat.isFile()) {
+        return { error: "Media file not found.", status: 404 };
+      }
+      if (expectedType === "directory" && !fileStat.isDirectory()) {
+        return { error: "Folder not found.", status: 404 };
+      }
+      return { ...location, fileStat };
+    } catch (error) {
+      return {
+        error,
+        status: 404,
+        rootPath: location.rootState.activePath
+      };
+    }
+  };
+
+  if (normalizedSourcePreference === "preferred" && library?.preferredPath) {
+    if (!preferredEnabled) {
+      return {
+        error: requestedMediaType === "video"
+          ? "Desktop original access is disabled for this library."
+          : "Preferred source access is disabled for this library.",
+        status: 404
+      };
+    }
+    const preferredLocation = await resolveFromExplicitRoot(library.preferredPath);
+    if (!preferredLocation?.error) {
+      return preferredLocation;
+    }
+    return typeof preferredLocation.error === "string"
+      ? preferredLocation
+      : {
+          error: expectedType === "directory" ? "Folder not found." : "Media file not found.",
+          status: 404
+        };
+  }
+
+  if (normalizedSourcePreference === "fallback" && (library?.fallbackPath || library?.path)) {
+    const fallbackLocation = await resolveFromExplicitRoot(library.fallbackPath || library.path);
+    if (!fallbackLocation?.error) {
+      return fallbackLocation;
+    }
+    return typeof fallbackLocation.error === "string"
+      ? fallbackLocation
+      : {
+          error: expectedType === "directory" ? "Folder not found." : "Media file not found.",
+          status: 404
+        };
+  }
+
+  if (
+    normalizedSourcePreference === "auto" &&
+    expectedType === "file" &&
+    requestedMediaType === "video" &&
+    library?.preferFallbackForVideos &&
+    library?.fallbackPath
+  ) {
+    const preferredVideoLocation = await resolveFromExplicitRoot(library.fallbackPath);
+
+    if (!preferredVideoLocation?.error) {
+      return preferredVideoLocation;
+    }
+  }
+
+  const attempt = async (forceRefresh = false) => {
+    const location = await resolveMediaLocationAsync(library, relativePath, { forceRefresh });
+    if (!location) {
+      return { error: "Invalid media path.", status: 400 };
+    }
+
+    try {
+      const fileStat = await stat(location.resolvedPath);
+      if (expectedType === "file" && !fileStat.isFile()) {
+        return { error: "Media file not found.", status: 404 };
+      }
+      if (expectedType === "directory" && !fileStat.isDirectory()) {
+        return { error: "Folder not found.", status: 404 };
+      }
+      return { ...location, fileStat };
+    } catch (error) {
+      return {
+        error,
+        status: 404,
+        rootPath: location.rootState.activePath
+      };
+    }
+  };
+
+  const firstAttempt = await attempt(false);
+  if (!firstAttempt?.error || !mediaLibrarySupportsHybridRoots(library)) {
+    return firstAttempt;
+  }
+
+  invalidateMediaLibraryRootCache(library.id);
+  const secondAttempt = await attempt(true);
+  if (!secondAttempt?.error) {
+    return secondAttempt;
+  }
+
+  return typeof secondAttempt.error === "string"
+    ? secondAttempt
+    : {
+        error: expectedType === "directory" ? "Folder not found." : "Media file not found.",
+        status: 404
+      };
+}
+
 async function getMediaFileForRequest(library, relativePath = "") {
-  const resolvedPath = resolveMediaPath(library, relativePath);
-  if (!resolvedPath) {
-    return { error: "Invalid media path.", status: 400 };
+  const located = await statMediaLocation(library, relativePath, { expectedType: "file" });
+  if (located.error) {
+    return {
+      error: typeof located.error === "string" ? located.error : "Media file not found.",
+      status: located.status || 404
+    };
   }
 
-  let fileStat;
-  try {
-    fileStat = await stat(resolvedPath);
-  } catch {
-    return { error: "Media file not found.", status: 404 };
-  }
-
-  if (!fileStat.isFile()) {
-    return { error: "Media file not found.", status: 404 };
-  }
-
+  const { resolvedPath, fileStat, rootState } = located;
   const mediaType = mediaTypeForExtension(path.extname(resolvedPath));
-  return { resolvedPath, fileStat, mediaType };
+  return { resolvedPath, fileStat, mediaType, rootState };
 }
 
 function quarantineRelativePath(library, relativePath = "") {
@@ -3390,7 +3990,7 @@ async function quarantineMediaFile(library, relativePath) {
   await mkdir(path.dirname(destinationBase), { recursive: true });
   const destinationPath = await uniqueDestinationPath(destinationBase);
   await moveFilePreservingContents(file.resolvedPath, destinationPath);
-  await pruneEmptyDirectories(path.dirname(file.resolvedPath), library.path);
+  await pruneEmptyDirectories(path.dirname(file.resolvedPath), file.rootState?.activePath || library.path);
   invalidateMediaLibraryCache(library.id);
 
   return {
@@ -3593,48 +4193,67 @@ function enrichMediaEntry(library, entry) {
 }
 
 async function buildMediaIndex(library) {
-  const matches = [];
-  const queue = [library.path];
-
-  while (queue.length > 0) {
-    const currentDirectory = queue.shift();
-    const entries = await readdir(currentDirectory, { withFileTypes: true });
-
-    for (const entry of entries) {
-      const fullPath = path.join(currentDirectory, entry.name);
-      const relativePath = relativeMediaPath(library, fullPath);
-
-      if (isExcludedRelativePath(library, relativePath)) {
-        continue;
-      }
-
-      if (entry.isDirectory()) {
-        queue.push(fullPath);
-        continue;
-      }
-
-      if (!entry.isFile()) {
-        continue;
-      }
-
-      const extension = path.extname(entry.name);
-      const mediaType = mediaTypeForExtension(extension);
-      if (mediaType === "other") {
-        continue;
-      }
-
-      const fileStat = await stat(fullPath);
-      matches.push(buildIndexedMediaEntry(library, fullPath, fileStat, mediaType, extension));
+  const runIndex = async (forceRefresh = false) => {
+    const rootState = await resolveMediaLibraryRootState(library, { forceRefresh });
+    if (!rootState?.activePath) {
+      return [];
     }
-  }
 
-  matches.sort((left, right) => new Date(right.modifiedAt).getTime() - new Date(left.modifiedAt).getTime());
-  return matches;
+    const matches = [];
+    const queue = [rootState.activePath];
+
+    while (queue.length > 0) {
+      const currentDirectory = queue.shift();
+      const entries = await readdir(currentDirectory, { withFileTypes: true });
+
+      for (const entry of entries) {
+        const fullPath = path.join(currentDirectory, entry.name);
+        const relativePath = relativeMediaPath(library, fullPath);
+
+        if (isExcludedRelativePath(library, relativePath)) {
+          continue;
+        }
+
+        if (entry.isDirectory()) {
+          queue.push(fullPath);
+          continue;
+        }
+
+        if (!entry.isFile()) {
+          continue;
+        }
+
+        const extension = path.extname(entry.name);
+        const mediaType = mediaTypeForExtension(extension);
+        if (mediaType === "other") {
+          continue;
+        }
+
+        const fileStat = await stat(fullPath);
+        matches.push(buildIndexedMediaEntry(library, fullPath, fileStat, mediaType, extension));
+      }
+    }
+
+    matches.sort((left, right) => new Date(right.modifiedAt).getTime() - new Date(left.modifiedAt).getTime());
+    return matches;
+  };
+
+  try {
+    return await runIndex(false);
+  } catch (error) {
+    if (!mediaLibrarySupportsHybridRoots(library)) {
+      throw error;
+    }
+
+    invalidateMediaLibraryRootCache(library.id);
+    return runIndex(true);
+  }
 }
 
 async function getMediaIndex(library) {
   const cached = mediaIndexCache.get(library.id);
-  if (cached && Date.now() - cached.builtAt < MEDIA_INDEX_TTL_MS) {
+  const rootState = await resolveMediaLibraryRootState(library);
+  if (cached && Date.now() - cached.builtAt < MEDIA_INDEX_TTL_MS && cached.rootPath === rootState?.activePath) {
     return cached.files;
   }
 
@@ -3644,7 +4263,7 @@ async function getMediaIndex(library) {
 
   const job = (async () => {
     const files = await buildMediaIndex(library);
-    mediaIndexCache.set(library.id, { builtAt: Date.now(), files });
+    mediaIndexCache.set(library.id, { builtAt: Date.now(), files, rootPath: rootState?.activePath || null });
     return files;
   })();
 
@@ -3757,6 +4376,13 @@ function requestGuardForPath(request) {
     };
   }
 
+  if (requestPath === "/messages" || requestPath.startsWith("/api/messages/")) {
+    return {
+      kind: "authenticated",
+      message: "Sign in to read or send messages."
+    };
+  }
+
   if (requestPath.startsWith("/api/mobile/")) {
     return {
       kind: "authenticated",
@@ -3832,9 +4458,36 @@ function requestSatisfiesGuard(request, guard) {
 // already-compressed media (images, video, zip, woff2), so thumbnails and
 // video proxies pass through untouched. threshold=1024 avoids wasting CPU on
 // tiny bodies where gzip overhead outweighs the savings.
-app.use(compression({ threshold: 1024 }));
+app.use(
+  compression({
+    threshold: 1024,
+    // Skip speed-test endpoints â€” compressing random payloads there would
+    // corrupt throughput measurements (gzip shows a misleading 10x if the
+    // bytes happen to be zeros, and bogs CPU if they're random).
+    filter(req, res) {
+      if (req.path && req.path.startsWith("/api/speedtest/")) return false;
+      // Fall back to compression's default filter otherwise.
+      return compression.filter(req, res);
+    }
+  })
+);
 
 app.use(express.json({ limit: "1mb" }));
+app.use((request, response, next) => {
+  if (!requestRequiresSameOriginProtection(request) || requestCanBypassSameOriginProtection(request)) {
+    return next();
+  }
+
+  const actualOrigin = requestOriginHeader(request) || requestRefererOrigin(request);
+  const expectedOrigin = canonicalRequestOrigin(request);
+  if (actualOrigin && expectedOrigin && actualOrigin === expectedOrigin) {
+    return next();
+  }
+
+  return response.status(403).json({
+    error: "Cross-site request blocked. Reload Hearthboard and try again."
+  });
+});
 app.use(async (request, response, next) => {
   try {
     await trackDeviceRequest(request, response);
@@ -3862,6 +4515,23 @@ app.use(async (request, response, next) => {
   return response.redirect(loginRedirectUrl(request, nextPath));
 });
 
+// Uploaded account portraits. Mounted BEFORE the public/ static middleware so
+// a rebuilt image (which may include a stale placeholder) can't shadow the
+// persistent file. Files are stored under DATA_DIR/avatars (the Docker
+// named-volume mount) so they survive `docker compose up --build`.
+app.use(
+  "/avatars",
+  express.static(AVATARS_DIR, {
+    etag: true,
+    lastModified: true,
+    fallthrough: false,
+    setHeaders(response) {
+      response.setHeader("Cache-Control", "public, max-age=86400, must-revalidate");
+      response.setHeader("X-Content-Type-Options", "nosniff");
+    }
+  })
+);
+
 app.use(
   express.static(path.join(__dirname, "public"), {
     etag: true,
@@ -3869,11 +4539,23 @@ app.use(
     maxAge: "1h",
     setHeaders(response, filePath) {
       const ext = path.extname(filePath).toLowerCase();
-      // Image / font / favicon assets can sit in the browser cache for a day.
+      // Image / font / favicon assets rarely change. Keep them a week in the
+      // browser cache, then allow up to another day of stale-while-revalidate
+      // so the next load is instant while the browser refetches in the
+      // background.
       if ([".svg", ".png", ".jpg", ".jpeg", ".webp", ".ico", ".woff", ".woff2"].includes(ext)) {
-        response.setHeader("Cache-Control", "public, max-age=86400, must-revalidate");
+        response.setHeader(
+          "Cache-Control",
+          "public, max-age=604800, stale-while-revalidate=86400"
+        );
       } else if ([".css", ".js", ".mjs"].includes(ext)) {
-        response.setHeader("Cache-Control", "public, max-age=3600, must-revalidate");
+        // Scripts/styles change more often. One hour of strong caching plus
+        // 10 minutes of stale-while-revalidate gives instant subsequent loads
+        // without ever serving something truly stale (etag still gatekeeps).
+        response.setHeader(
+          "Cache-Control",
+          "public, max-age=3600, stale-while-revalidate=600"
+        );
       } else if (ext === ".html") {
         // HTML shells must always revalidate so we never strand a stale shell
         // in front of a fresh JS bundle.
@@ -4005,6 +4687,13 @@ app.get("/api/account", (request, response) => {
     libraryVisibility: user.role === "admin"
       ? Object.fromEntries(mediaLibraries.map((library) => [library.id, libraryVisibility(library)]))
       : null,
+    librarySourceSettings: user.role === "admin"
+      ? Object.fromEntries(
+          mediaLibraries
+            .filter((library) => library.preferredPath)
+            .map((library) => [library.id, normalizeLibrarySourceSettingsEntry(library, db.data.security.librarySourceSettings?.[library.id])])
+        )
+      : null,
     deviceSummary: user.role === "admin" ? deviceActivitySummary() : null,
     devices: user.role === "admin" ? groupedDeviceActivity() : null,
     users: user.role === "admin"
@@ -4026,17 +4715,29 @@ app.get("/api/account", (request, response) => {
       id: library.id,
       label: library.label,
       writable: Boolean(library.writable),
-      visibility: libraryVisibility(library)
+      visibility: libraryVisibility(library),
+      hasPreferredSource: Boolean(library.preferredPath),
+      preferredSourceLabel: library.preferredSourceLabel || "Desktop full resolution",
+      fallbackSourceLabel: library.fallbackSourceLabel || "Local mirror",
+      preferredSourceEnabled: mediaLibraryPreferredSourceEnabled(library)
     }))
   });
 });
 
 app.get("/api/nav", (request, response) => {
   const user = authenticatedUser(request);
+  let unreadMessages = 0;
+  if (user && messagingEnabled()) {
+    for (const c of db.data.conversations) {
+      if (!c || !userInConversation(user, c)) continue;
+      unreadMessages += unreadCountFor(c, user);
+    }
+  }
   response.json({
     authenticated: Boolean(user),
     user: userSummary(user, request),
-    unreadNotifications: user ? unreadNotificationCountForUser(user) : 0
+    unreadNotifications: user ? unreadNotificationCountForUser(user) : 0,
+    unreadMessages
   });
 });
 
@@ -4152,7 +4853,7 @@ app.post("/api/account/avatar", avatarRawParser, async (request, response) => {
     return response.status(415).json({ error: "Upload a JPEG, PNG, or WebP image." });
   }
 
-  // Guard against server misconfig where content-type is a lie — we trust the
+  // Guard against server misconfig where content-type is a lie â€” we trust the
   // magic bytes, not the header. But if the header is present, make sure it
   // at least points at an image type.
   const headerType = String(request.headers["content-type"] || "").toLowerCase().split(";")[0].trim();
@@ -4276,7 +4977,7 @@ app.post("/api/account/notifications/:notificationId/dismiss", async (request, r
   return response.json({ ok: true });
 });
 
-// Marks an entire event as "task finished" for this user — suppresses every
+// Marks an entire event as "task finished" for this user â€” suppresses every
 // future reminder for that event and quiets the notification feed from now on.
 app.post("/api/account/notifications/event/:eventId/complete", async (request, response) => {
   const user = authenticatedUser(request);
@@ -4290,7 +4991,7 @@ app.post("/api/account/notifications/event/:eventId/complete", async (request, r
   }
 
   // Confirm the user has at least one reminder for this event before letting
-  // them mark it complete — prevents blind writes for events they can't see.
+  // them mark it complete â€” prevents blind writes for events they can't see.
   const hasReminder = upcomingReminderEntriesForUser(user).some((reminder) => reminder.eventId === eventId);
   if (!hasReminder) {
     return response.status(404).json({ error: "That event no longer has reminders to finish." });
@@ -4331,6 +5032,1373 @@ app.delete("/api/account/notifications/event/:eventId/complete", async (request,
   return response.json({ ok: true, eventId });
 });
 
+// ---------------------------------------------------------------------------
+// Calendar integrations (Google + Microsoft/Outlook)
+//
+// Flow:
+//   1. Browser opens /api/integrations/:provider/start  â†’ server redirects
+//      to provider authorize URL with PKCE + CSRF state stored server-side.
+//   2. Provider redirects back to /api/integrations/:provider/callback?code=...
+//      â†’ server exchanges the code, fetches user info + calendar list,
+//      encrypts tokens at rest, persists the integration, runs an initial
+//      sync, and redirects the user back to /account.
+//   3. /api/integrations/:integrationId/sync-now triggers a manual sync.
+//   4. DELETE /api/integrations/:integrationId removes the stored tokens
+//      and drops every event imported from that integration.
+// ---------------------------------------------------------------------------
+
+const INTEGRATION_PROVIDERS = {
+  google: { client: googleIntegration, callbackPath: "/api/integrations/google/callback" },
+  microsoft: { client: microsoftIntegration, callbackPath: "/api/integrations/microsoft/callback" }
+};
+
+function integrationSummary(integration) {
+  if (!integration) return null;
+  return {
+    id: integration.id,
+    provider: integration.provider,
+    accountEmail: integration.accountEmail || "",
+    accountDisplayName: integration.accountDisplayName || "",
+    calendars: Array.isArray(integration.calendars)
+      ? integration.calendars.map((cal) => ({
+          id: cal.id,
+          summary: cal.summary,
+          primary: Boolean(cal.primary)
+        }))
+      : [],
+    lastSyncAt: integration.lastSyncAt || null,
+    lastSyncError: integration.lastSyncError || null,
+    lastSyncSummary: integration.lastSyncSummary || null,
+    createdAt: integration.createdAt || null,
+    updatedAt: integration.updatedAt || null,
+    linkedByUserId: integration.userId || null,
+    linkedByUsername: integration.linkedByUsername || ""
+  };
+}
+
+function listIntegrationsForResponse() {
+  if (!Array.isArray(db.data.integrations)) return [];
+  return db.data.integrations.map(integrationSummary);
+}
+
+app.get("/api/integrations", (request, response) => {
+  const user = authenticatedUser(request);
+  if (!user) {
+    return response.status(401).json({ error: "Sign in to view connected calendars." });
+  }
+  response.json({
+    integrations: listIntegrationsForResponse(),
+    providers: {
+      google: {
+        configured: googleIntegration.isConfigured(),
+        label: "Google Calendar"
+      },
+      microsoft: {
+        configured: microsoftIntegration.isConfigured(),
+        label: "Outlook Calendar"
+      }
+    },
+    encryptionReady: isEncryptionConfigured()
+  });
+});
+
+app.get("/api/integrations/:provider/start", (request, response) => {
+  const user = authenticatedUser(request);
+  if (!user) {
+    return response.status(401).json({ error: "Sign in to connect a calendar." });
+  }
+
+  const providerKey = String(request.params.provider || "").toLowerCase();
+  const providerDef = INTEGRATION_PROVIDERS[providerKey];
+  if (!providerDef) {
+    return response.status(404).json({ error: "Unknown calendar provider." });
+  }
+  if (!providerDef.client.isConfigured()) {
+    return response.status(503).json({
+      error: `This server doesn't have ${providerKey === "google" ? "Google" : "Microsoft"} OAuth credentials configured yet.`
+    });
+  }
+  if (!isEncryptionConfigured()) {
+    return response.status(503).json({
+      error: "Token encryption key is missing. Set INTEGRATION_TOKEN_ENCRYPTION_KEY in .env."
+    });
+  }
+
+  const { verifier, challenge } = generatePkcePair();
+  const returnTo = String(request.query?.returnTo || "/account");
+  const state = issueState(db, {
+    userId: user.id,
+    provider: providerKey,
+    pkceVerifier: verifier,
+    returnTo
+  });
+
+  // Best effort persist of state now so it survives even if the browser
+  // callback hits a different worker (we have only one, but be safe).
+  requestDbWrite();
+
+  const redirectUri = resolveRedirectUri(request, providerDef.callbackPath);
+  const url = providerDef.client.buildAuthorizationUrl({
+    redirectUri,
+    state,
+    codeChallenge: challenge
+  });
+
+  response.redirect(url);
+});
+
+app.get("/api/integrations/:provider/callback", async (request, response) => {
+  const providerKey = String(request.params.provider || "").toLowerCase();
+  const providerDef = INTEGRATION_PROVIDERS[providerKey];
+  if (!providerDef) {
+    return response.status(404).send("Unknown provider.");
+  }
+
+  const providerError = String(request.query?.error || "").trim();
+  if (providerError) {
+    const desc = String(request.query?.error_description || "").trim();
+    return response.status(400).send(
+      `Calendar provider returned an error: ${providerError}${desc ? ` â€” ${desc}` : ""}. ` +
+        `You can close this tab and try again from your account page.`
+    );
+  }
+
+  const code = String(request.query?.code || "").trim();
+  const stateToken = String(request.query?.state || "").trim();
+  if (!code || !stateToken) {
+    return response.status(400).send("Missing authorization code or state.");
+  }
+
+  const state = consumeState(db, { token: stateToken, provider: providerKey });
+  if (!state) {
+    return response.status(400).send(
+      "This sign-in link has expired or doesn't match the current session. Start again from the account page."
+    );
+  }
+
+  // Re-fetch the user who initiated the flow â€” they should still be signed
+  // in for the callback to match, but we don't hard-require cookies here,
+  // since the state token itself proves intent.
+  const ownerUser = users().find((u) => u.id === state.userId);
+  if (!ownerUser) {
+    return response.status(400).send("The user who started this connection no longer exists.");
+  }
+
+  const redirectUri = resolveRedirectUri(request, providerDef.callbackPath);
+
+  let tokenResponse;
+  try {
+    tokenResponse = await providerDef.client.exchangeAuthorizationCode({
+      code,
+      redirectUri,
+      codeVerifier: state.pkceVerifier
+    });
+  } catch (err) {
+    return response
+      .status(502)
+      .send(`Could not exchange the authorization code: ${err?.message || err}`);
+  }
+
+  const accessToken = String(tokenResponse.access_token || "").trim();
+  const refreshToken = String(tokenResponse.refresh_token || "").trim();
+  if (!accessToken) {
+    return response.status(502).send("Provider did not return an access_token.");
+  }
+  if (!refreshToken) {
+    return response.status(502).send(
+      "Provider did not return a refresh_token. For Google, revoke the app at " +
+        "https://myaccount.google.com/permissions and try again so the consent " +
+        "screen reappears. For Microsoft, ensure offline_access is in the scopes."
+    );
+  }
+
+  let userInfo = { email: "", displayName: "", picture: null };
+  try {
+    userInfo = await providerDef.client.fetchUserInfo(accessToken);
+  } catch {
+    // Non-fatal: we'll store an empty email and the user can still use it.
+  }
+
+  const expiresInSec = Number(tokenResponse.expires_in || 3600);
+  const nowIso = new Date().toISOString();
+
+  // If this user already has an integration for the same provider + same
+  // account email, update it in place rather than creating a duplicate.
+  const existing = db.data.integrations.find(
+    (entry) =>
+      entry.provider === providerKey &&
+      entry.userId === ownerUser.id &&
+      String(entry.accountEmail || "").toLowerCase() === String(userInfo.email || "").toLowerCase()
+  );
+
+  const integrationRecord = existing || {
+    id: nanoid(),
+    provider: providerKey,
+    userId: ownerUser.id,
+    linkedByUsername: ownerUser.username,
+    createdAt: nowIso,
+    syncCursors: {},
+    calendars: [],
+    lastSyncAt: null,
+    lastSyncError: null,
+    lastSyncSummary: null,
+    lastCalendarErrors: null,
+    disabled: false
+  };
+
+  integrationRecord.accountEmail = String(userInfo.email || "").trim();
+  integrationRecord.accountDisplayName = String(userInfo.displayName || "").trim();
+  integrationRecord.updatedAt = nowIso;
+  integrationRecord.tokens = {
+    accessTokenEncrypted: encryptSecret(accessToken),
+    accessTokenExpiresAt: Date.now() + expiresInSec * 1000,
+    refreshTokenEncrypted: encryptSecret(refreshToken),
+    scope: String(tokenResponse.scope || "")
+  };
+
+  if (!existing) {
+    db.data.integrations.push(integrationRecord);
+  }
+
+  // Kick off an initial sync so the calendar is populated immediately.
+  try {
+    await syncIntegration(db, integrationRecord);
+  } catch (err) {
+    integrationRecord.lastSyncError = {
+      message: String(err?.message || err),
+      at: new Date().toISOString()
+    };
+  }
+
+  await db.write();
+
+  const safeReturn = /^\/[^\/]/.test(state.returnTo) ? state.returnTo : "/account";
+  response.redirect(safeReturn + (safeReturn.includes("?") ? "&" : "?") + "calendar=connected");
+});
+
+app.post("/api/integrations/:integrationId/sync-now", async (request, response) => {
+  const user = authenticatedUser(request);
+  if (!user) {
+    return response.status(401).json({ error: "Sign in to sync calendars." });
+  }
+
+  const id = String(request.params.integrationId || "").trim();
+  const integration = (db.data.integrations || []).find((entry) => entry.id === id);
+  if (!integration) {
+    return response.status(404).json({ error: "That calendar connection is not on file." });
+  }
+
+  // Admin or the user who linked it can sync.
+  const isAdmin = user.role === "admin";
+  if (!isAdmin && integration.userId !== user.id) {
+    return response.status(403).json({ error: "You can only sync calendars you linked." });
+  }
+
+  try {
+    const result = await syncIntegration(db, integration);
+    await db.write();
+    return response.json({
+      ok: true,
+      integration: integrationSummary(integration),
+      result
+    });
+  } catch (err) {
+    integration.lastSyncError = {
+      message: String(err?.message || err),
+      at: new Date().toISOString()
+    };
+    await db.write();
+    return response.status(502).json({
+      error: `Sync failed: ${err?.message || err}`,
+      integration: integrationSummary(integration)
+    });
+  }
+});
+
+app.delete("/api/integrations/:integrationId", async (request, response) => {
+  const user = authenticatedUser(request);
+  if (!user) {
+    return response.status(401).json({ error: "Sign in to disconnect a calendar." });
+  }
+
+  const id = String(request.params.integrationId || "").trim();
+  const index = (db.data.integrations || []).findIndex((entry) => entry.id === id);
+  if (index < 0) {
+    return response.status(404).json({ error: "That calendar connection is not on file." });
+  }
+
+  const integration = db.data.integrations[index];
+  const isAdmin = user.role === "admin";
+  if (!isAdmin && integration.userId !== user.id) {
+    return response.status(403).json({ error: "You can only disconnect calendars you linked." });
+  }
+
+  // Drop every imported event tied to this integration.
+  db.data.events = db.data.events.filter(
+    (event) =>
+      !(event?.source?.provider === integration.provider &&
+        String(event?.source?.integrationId || "") === String(integration.id))
+  );
+
+  db.data.integrations.splice(index, 1);
+  await db.write();
+
+  return response.json({ ok: true, removedId: id });
+});
+
+// ========================================================================
+//  Encrypted household messaging
+// ========================================================================
+// Each household member can post to the shared "Household" channel and
+// start private 1:1 DMs with any other member. Message bodies are stored
+// encrypted (messaging/crypto.js); plaintext only lives in memory briefly
+// while we format a response for a member of the conversation. Admins
+// do NOT have a backdoor UI â€” per-message membership is the sole gate.
+
+const MESSAGE_BODY_MAX_LENGTH = 4000;
+
+function messagingEnabled() {
+  return isMessagingEncryptionConfigured();
+}
+
+function householdConversation() {
+  return db.data.conversations.find((c) => c && c.type === "household") || null;
+}
+
+function conversationById(id) {
+  if (!id) return null;
+  return db.data.conversations.find((c) => c && c.id === id) || null;
+}
+
+// Strict membership check: for household anyone authenticated passes,
+// for DMs the user must appear in memberIds.
+function userInConversation(user, conversation) {
+  if (!user || !conversation) return false;
+  if (conversation.type === "household") return true;
+  if (conversation.type === "dm") {
+    return Array.isArray(conversation.memberIds) && conversation.memberIds.includes(user.id);
+  }
+  return false;
+}
+
+function messageAuthorSummary(user, request = null) {
+  if (!user) {
+    return { id: null, name: "Unknown", username: "unknown", avatar: null };
+  }
+  return {
+    id: user.id,
+    username: user.username,
+    name: prettifyUsername(user.username),
+    avatar: userAvatarSummary(user, request)
+  };
+}
+
+// Canonical DM key so (A,B) and (B,A) resolve to the same thread.
+function canonicalDmMemberIds(a, b) {
+  return [String(a), String(b)].sort();
+}
+
+function dmConversationBetween(userIdA, userIdB) {
+  const pair = canonicalDmMemberIds(userIdA, userIdB);
+  return (
+    db.data.conversations.find(
+      (c) =>
+        c &&
+        c.type === "dm" &&
+        Array.isArray(c.memberIds) &&
+        c.memberIds.length === 2 &&
+        c.memberIds[0] === pair[0] &&
+        c.memberIds[1] === pair[1]
+    ) || null
+  );
+}
+
+function userLastReadAt(conversationId, userId) {
+  const entry = db.data.messageReads?.[conversationId];
+  if (!entry || typeof entry !== "object") return null;
+  return entry[userId] || null;
+}
+
+function setUserLastReadAt(conversationId, userId, isoTime) {
+  if (!db.data.messageReads[conversationId] || typeof db.data.messageReads[conversationId] !== "object") {
+    db.data.messageReads[conversationId] = {};
+  }
+  db.data.messageReads[conversationId][userId] = isoTime;
+}
+
+function unreadCountFor(conversation, user) {
+  const cutoff = userLastReadAt(conversation.id, user.id);
+  const cutoffTime = cutoff ? Date.parse(cutoff) : 0;
+  let count = 0;
+  for (const message of db.data.messages) {
+    if (!message || message.conversationId !== conversation.id) continue;
+    if (message.senderId === user.id) continue; // your own messages never count as unread
+    const ts = Date.parse(message.createdAt || "");
+    if (Number.isFinite(ts) && ts > cutoffTime) count += 1;
+  }
+  return count;
+}
+
+function conversationSummary(conversation, viewer, request) {
+  const messagesForThread = db.data.messages.filter(
+    (m) => m && m.conversationId === conversation.id
+  );
+  let lastMessage = null;
+  if (messagesForThread.length) {
+    const latest = messagesForThread[messagesForThread.length - 1];
+    const sender = userById(latest.senderId);
+    const preview = tryDecryptMessageBody(latest.body);
+    lastMessage = {
+      id: latest.id,
+      createdAt: latest.createdAt,
+      senderId: latest.senderId,
+      senderName: sender ? prettifyUsername(sender.username) : "Someone",
+      // Clip the preview server-side so a 4000-char message doesn't blow
+      // up the list payload. The full body is in GET /messages.
+      preview: preview ? preview.slice(0, 160) : "[unavailable]"
+    };
+  }
+
+  let title = "Household";
+  let members = [];
+  if (conversation.type === "dm") {
+    const memberIds = conversation.memberIds || [];
+    members = memberIds.map((id) => {
+      const u = userById(id);
+      return u ? messageAuthorSummary(u, request) : { id, username: "unknown", name: "Unknown", avatar: null };
+    });
+    const other = members.find((m) => m.id !== viewer.id);
+    title = other ? other.name : "Direct message";
+  }
+
+  return {
+    id: conversation.id,
+    type: conversation.type,
+    title,
+    members,
+    createdAt: conversation.createdAt,
+    updatedAt: conversation.updatedAt,
+    lastMessageAt: conversation.lastMessageAt,
+    lastMessage,
+    unreadCount: unreadCountFor(conversation, viewer)
+  };
+}
+
+// Return every conversation the viewer can see: the single household
+// channel plus any DM they're a member of.
+function conversationsForViewer(viewer, request) {
+  const out = [];
+  for (const c of db.data.conversations) {
+    if (!c) continue;
+    if (!userInConversation(viewer, c)) continue;
+    out.push(conversationSummary(c, viewer, request));
+  }
+  // Newest-first by lastMessageAt (falling back to createdAt).
+  out.sort((a, b) => {
+    const ta = Date.parse(a.lastMessage?.createdAt || a.lastMessageAt || a.createdAt || "") || 0;
+    const tb = Date.parse(b.lastMessage?.createdAt || b.lastMessageAt || b.createdAt || "") || 0;
+    return tb - ta;
+  });
+  return out;
+}
+
+// --- Routes ---------------------------------------------------------------
+
+app.get("/api/messages/contacts", (request, response) => {
+  const user = authenticatedUser(request);
+  if (!user) return response.status(401).json({ error: "Sign in to see household members." });
+  const list = users()
+    .filter((u) => u.id !== user.id)
+    .filter((u) => u.role === "admin" || u.approved)
+    .map((u) => ({
+      id: u.id,
+      username: u.username,
+      name: prettifyUsername(u.username),
+      avatar: userAvatarSummary(u, request),
+      role: u.role
+    }));
+  return response.json({ contacts: list });
+});
+
+app.get("/api/messages/conversations", (request, response) => {
+  const user = authenticatedUser(request);
+  if (!user) return response.status(401).json({ error: "Sign in to read messages." });
+  if (!messagingEnabled()) {
+    return response.status(503).json({
+      error:
+        "Messaging is unavailable until INTEGRATION_TOKEN_ENCRYPTION_KEY is set in .env."
+    });
+  }
+  return response.json({ conversations: conversationsForViewer(user, request) });
+});
+
+// Open-or-return a 1:1 DM with another household member. Idempotent:
+// calling twice returns the same conversation.
+app.post("/api/messages/conversations/dm", async (request, response) => {
+  const user = authenticatedUser(request);
+  if (!user) return response.status(401).json({ error: "Sign in to start a DM." });
+  if (!messagingEnabled()) {
+    return response.status(503).json({ error: "Messaging is unavailable (encryption key not set)." });
+  }
+  const otherUserId = String(request.body?.otherUserId || "").trim();
+  if (!otherUserId || otherUserId === user.id) {
+    return response.status(400).json({ error: "Pick a different household member." });
+  }
+  const other = userById(otherUserId);
+  if (!other) {
+    return response.status(404).json({ error: "That household member no longer exists." });
+  }
+
+  let convo = dmConversationBetween(user.id, other.id);
+  if (!convo) {
+    const nowIso = new Date().toISOString();
+    convo = {
+      id: nanoid(),
+      type: "dm",
+      memberIds: canonicalDmMemberIds(user.id, other.id),
+      title: null,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      lastMessageAt: null
+    };
+    db.data.conversations.push(convo);
+    await db.write();
+  }
+  return response.json({ conversation: conversationSummary(convo, user, request) });
+});
+
+app.get("/api/messages/conversations/:id/messages", (request, response) => {
+  const user = authenticatedUser(request);
+  if (!user) return response.status(401).json({ error: "Sign in to read messages." });
+  if (!messagingEnabled()) {
+    return response.status(503).json({ error: "Messaging is unavailable (encryption key not set)." });
+  }
+  const convo = conversationById(request.params.id);
+  if (!convo) return response.status(404).json({ error: "Conversation not found." });
+  if (!userInConversation(user, convo)) {
+    return response.status(403).json({ error: "You're not a member of that conversation." });
+  }
+
+  const rawList = db.data.messages.filter((m) => m && m.conversationId === convo.id);
+  rawList.sort((a, b) => Date.parse(a.createdAt || 0) - Date.parse(b.createdAt || 0));
+
+  const messages = rawList.map((m) => {
+    const sender = userById(m.senderId);
+    const body = tryDecryptMessageBody(m.body);
+    return {
+      id: m.id,
+      conversationId: m.conversationId,
+      createdAt: m.createdAt,
+      editedAt: m.editedAt || null,
+      author: messageAuthorSummary(sender, request),
+      body: body ?? "[unavailable]",
+      decryptOk: body !== null
+    };
+  });
+
+  return response.json({
+    conversation: conversationSummary(convo, user, request),
+    messages
+  });
+});
+
+app.post("/api/messages/conversations/:id/messages", async (request, response) => {
+  const user = authenticatedUser(request);
+  if (!user) return response.status(401).json({ error: "Sign in to send a message." });
+  if (!messagingEnabled()) {
+    return response.status(503).json({ error: "Messaging is unavailable (encryption key not set)." });
+  }
+  const convo = conversationById(request.params.id);
+  if (!convo) return response.status(404).json({ error: "Conversation not found." });
+  if (!userInConversation(user, convo)) {
+    return response.status(403).json({ error: "You're not a member of that conversation." });
+  }
+
+  const body = String(request.body?.body || "").trim();
+  if (!body) {
+    return response.status(400).json({ error: "Message body is required." });
+  }
+  if (body.length > MESSAGE_BODY_MAX_LENGTH) {
+    return response
+      .status(400)
+      .json({ error: `Message is too long (max ${MESSAGE_BODY_MAX_LENGTH} characters).` });
+  }
+
+  let cipher;
+  try {
+    cipher = encryptMessageBody(body);
+  } catch (err) {
+    return response.status(500).json({
+      error: `Could not encrypt message: ${err?.message || err}`
+    });
+  }
+
+  const nowIso = new Date().toISOString();
+  const message = {
+    id: nanoid(),
+    conversationId: convo.id,
+    senderId: user.id,
+    body: cipher,
+    createdAt: nowIso,
+    editedAt: null
+  };
+  db.data.messages.push(message);
+  convo.lastMessageAt = nowIso;
+  convo.updatedAt = nowIso;
+  // Sender is, by definition, caught up on their own message.
+  setUserLastReadAt(convo.id, user.id, nowIso);
+  await db.write();
+
+  return response.status(201).json({
+    message: {
+      id: message.id,
+      conversationId: convo.id,
+      createdAt: message.createdAt,
+      editedAt: null,
+      author: messageAuthorSummary(user, request),
+      body, // echo back plaintext â€” client already had it
+      decryptOk: true
+    }
+  });
+});
+
+app.post("/api/messages/conversations/:id/read", async (request, response) => {
+  const user = authenticatedUser(request);
+  if (!user) return response.status(401).json({ error: "Sign in to mark messages read." });
+  const convo = conversationById(request.params.id);
+  if (!convo) return response.status(404).json({ error: "Conversation not found." });
+  if (!userInConversation(user, convo)) {
+    return response.status(403).json({ error: "You're not a member of that conversation." });
+  }
+  setUserLastReadAt(convo.id, user.id, new Date().toISOString());
+  await db.write();
+  return response.json({ ok: true });
+});
+
+app.delete("/api/messages/:messageId", async (request, response) => {
+  const user = authenticatedUser(request);
+  if (!user) return response.status(401).json({ error: "Sign in to delete a message." });
+  const id = String(request.params.messageId || "").trim();
+  const index = db.data.messages.findIndex((m) => m && m.id === id);
+  if (index < 0) return response.status(404).json({ error: "Message not found." });
+  const message = db.data.messages[index];
+
+  // Sender can delete their own. Admins cannot reach into someone else's
+  // DM â€” per the household-privacy policy. (They can of course delete
+  // their own messages in the household channel.)
+  if (message.senderId !== user.id) {
+    return response.status(403).json({ error: "You can only delete your own messages." });
+  }
+  // Extra check: sender must still be in the conversation.
+  const convo = conversationById(message.conversationId);
+  if (!convo || !userInConversation(user, convo)) {
+    return response.status(403).json({ error: "You're not a member of that conversation." });
+  }
+  db.data.messages.splice(index, 1);
+  await db.write();
+  return response.json({ ok: true, removedId: id });
+});
+
+// Lightweight unread summary for the nav bell-style badge.
+app.get("/api/messages/unread", (request, response) => {
+  const user = authenticatedUser(request);
+  if (!user) return response.status(401).json({ error: "Sign in to see unread counts." });
+  if (!messagingEnabled()) return response.json({ total: 0, perConversation: {} });
+  let total = 0;
+  const perConversation = {};
+  for (const c of db.data.conversations) {
+    if (!c || !userInConversation(user, c)) continue;
+    const n = unreadCountFor(c, user);
+    if (n > 0) {
+      total += n;
+      perConversation[c.id] = n;
+    }
+  }
+  return response.json({ total, perConversation });
+});
+
+// ========================================================================
+//  Speed test
+// ========================================================================
+// Three tiny endpoints that let a browser measure effective throughput
+// against this server, plus a results log for the /stats page chart.
+// Public by design â€” the /stats page itself is visible to anyone, and
+// non-signed-in visitors (e.g. someone on the household Wi-Fi) should
+// still be able to run the test.
+
+const SPEEDTEST_DOWNLOAD_MAX_BYTES = 25 * 1024 * 1024; // 25 MB
+const SPEEDTEST_UPLOAD_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
+const SPEEDTEST_RETENTION_DAYS = 30;
+const SPEEDTEST_RESULTS_CAP = 5000; // hard cap, independent of retention
+let speedtestBackgroundTimer = null;
+let speedtestBackgroundRunning = false;
+
+// Pre-generate a 25 MB pad of pseudo-random bytes on first request and
+// slice from it. randomBytes() is slow at this size, but we only pay
+// the cost once per boot. Random data is incompressible, which matters
+// because we explicitly disabled gzip on this route.
+let _speedtestPad = null;
+function getSpeedtestPad() {
+  if (_speedtestPad) return _speedtestPad;
+  _speedtestPad = randomBytes(SPEEDTEST_DOWNLOAD_MAX_BYTES);
+  return _speedtestPad;
+}
+
+function trimSpeedtestHistory() {
+  const cutoff = Date.now() - SPEEDTEST_RETENTION_DAYS * 86400_000;
+  db.data.speedtestResults = db.data.speedtestResults.filter((entry) => {
+    const ts = Date.parse(entry?.ts || "");
+    return Number.isFinite(ts) && ts >= cutoff;
+  });
+  if (db.data.speedtestResults.length > SPEEDTEST_RESULTS_CAP) {
+    db.data.speedtestResults = db.data.speedtestResults.slice(
+      db.data.speedtestResults.length - SPEEDTEST_RESULTS_CAP
+    );
+  }
+}
+
+function sanitizeSpeedtestResultFields(input = {}) {
+  const rawSource = typeof input.source === "string" ? input.source.trim() : "";
+  const allowedSources = new Set(["internet", "lan", "custom"]);
+  const rawTarget = typeof input.target === "string" ? input.target.trim().slice(0, 80) : "";
+  const rawLocation = typeof input.serverLocation === "string"
+    ? input.serverLocation.trim().slice(0, 120)
+    : "";
+  const rawRunner = typeof input.runner === "string" ? input.runner.trim().slice(0, 80) : "";
+  return {
+    source: allowedSources.has(rawSource) ? rawSource : "internet",
+    target: rawTarget || null,
+    serverLocation: rawLocation || null,
+    runner: rawRunner || null
+  };
+}
+
+async function recordSpeedtestResult(input = {}) {
+  const downloadMbps = Number(input.downloadMbps);
+  const uploadMbps = Number(input.uploadMbps);
+  const latencyMs = Number(input.latencyMs);
+  function inRange(n, max) {
+    return Number.isFinite(n) && n >= 0 && n <= max;
+  }
+  if (!inRange(downloadMbps, 50_000) || !inRange(uploadMbps, 50_000) || !inRange(latencyMs, 60_000)) {
+    throw new Error("Invalid speed-test result.");
+  }
+
+  const meta = sanitizeSpeedtestResultFields(input);
+  const entry = {
+    id: nanoid(),
+    ts: new Date().toISOString(),
+    downloadMbps: Number(downloadMbps.toFixed(2)),
+    uploadMbps: Number(uploadMbps.toFixed(2)),
+    latencyMs: Number(latencyMs.toFixed(1)),
+    userId: input.userId || null,
+    client: typeof input.client === "string" && input.client.trim()
+      ? input.client.trim().slice(0, 40)
+      : null,
+    source: meta.source,
+    target: meta.target,
+    serverLocation: meta.serverLocation,
+    runner: meta.runner
+  };
+  db.data.speedtestResults.push(entry);
+  trimSpeedtestHistory();
+  await db.write();
+  return entry;
+}
+
+// Read a request body into memory with a hard cap. We prefer buffering
+// over streaming fetch() with Readable.toWeb + duplex:"half" because
+// the streaming path has a long history of silently hanging (undici,
+// express, content-length mismatches) â€” buffering is ~80 ms slower on
+// a gigabit LAN hop but gives us a deterministic proxy.
+async function bufferRequestBody(request, maxBytes) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of request) {
+    total += chunk.length;
+    if (total > maxBytes) {
+      throw Object.assign(new Error("request body exceeded " + maxBytes + " bytes"), { code: 413 });
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks, total);
+}
+
+// ----- Internet speed test proxy (Ookla / Spectrum Tampa) ---------------
+//
+// Cloudflare's anycast picks whichever POP the user's ISP has the shortest
+// BGP path to â€” for Spectrum in Tampa Bay that's often the Tampa POP, but
+// sometimes Miami. When it routes through Miami the numbers come in lower
+// than speedtest.net because speedtest.net uses Ookla's Spectrum Tampa
+// server, which has a dedicated PNI into the Spectrum network.
+//
+// Here we discover the Spectrum Tampa Ookla server at runtime (cached),
+// and proxy download/upload/meta through it. If any of that falls over
+// (Ookla blocks us, server is down, discovery times out) the client-side
+// failover kicks in and drops back to Cloudflare, then LAN, so the chart
+// never goes dark.
+
+const OOKLA_SERVER_LIST_URL =
+  "https://www.speedtest.net/api/js/servers?engine=js&search=tampa&limit=20";
+const OOKLA_BROWSER_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
+const OOKLA_CACHE_TTL_MS = 30 * 60_000; // 30 min
+const OOKLA_DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024;
+const OOKLA_UPLOAD_MAX_BYTES = 50 * 1024 * 1024;
+
+let ooklaTampaCache = { server: null, fetchedAt: 0, lastError: null };
+
+async function discoverOoklaTampaServer({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && ooklaTampaCache.server && now - ooklaTampaCache.fetchedAt < OOKLA_CACHE_TTL_MS) {
+    return ooklaTampaCache.server;
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(OOKLA_SERVER_LIST_URL, {
+      headers: { "User-Agent": OOKLA_BROWSER_UA, Accept: "application/json" },
+      signal: controller.signal,
+      cache: "no-store"
+    });
+    if (!res.ok) throw new Error("Ookla API " + res.status);
+    const list = await res.json();
+    if (!Array.isArray(list) || list.length === 0) throw new Error("No Tampa servers returned");
+    // Prefer Spectrum/Charter-sponsored Tampa entry (closest to what
+    // speedtest.net's "Spectrum Tampa" actually is); otherwise any Tampa
+    // server with the lowest distance; finally the first item.
+    const isSpectrumTampa = (s) =>
+      /spectrum|charter/i.test(s.sponsor || "") && /tampa/i.test(s.name || "");
+    const isTampa = (s) => /tampa/i.test(s.name || "");
+    const picked =
+      list.find(isSpectrumTampa) ||
+      list.filter(isTampa).sort((a, b) => (a.distance || 0) - (b.distance || 0))[0] ||
+      list[0];
+    ooklaTampaCache = { server: picked, fetchedAt: now, lastError: null };
+    return picked;
+  } catch (err) {
+    ooklaTampaCache.lastError = String(err?.message || err);
+    console.warn("[ookla/discover] failed:", ooklaTampaCache.lastError);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Compute the base URL for an Ookla server, stripping the upload.php tail
+// so we can append /download?size=N or /upload?nocache=X ourselves.
+function ooklaServerBase(server) {
+  if (!server || !server.url) return null;
+  try {
+    const u = new URL(server.url);
+    let p = u.pathname.replace(/\/+$/, "");
+    p = p.replace(/\/(speedtest\/)?upload(\.php)?$/i, "");
+    u.pathname = p;
+    u.search = "";
+    u.hash = "";
+    return u.toString().replace(/\/+$/, "");
+  } catch (_) {
+    return null;
+  }
+}
+
+app.get("/api/speedtest/internet/tampa-meta", async (request, response) => {
+  const server = await discoverOoklaTampaServer();
+  response.setHeader("Cache-Control", "no-store");
+  if (!server) {
+    return response.status(502).json({
+      error: "discover failed",
+      detail: ooklaTampaCache.lastError || "unknown"
+    });
+  }
+  return response.json({
+    sponsor: server.sponsor || null,
+    name: server.name || null,
+    country: server.country || null,
+    host: server.host || null,
+    city: server.name || null,
+    id: server.id || null,
+    lat: server.lat || null,
+    lon: server.lon || null,
+    distanceKm: server.distance || null,
+    url: server.url || null
+  });
+});
+
+app.get("/api/speedtest/internet/tampa-download", async (request, response) => {
+  const server = await discoverOoklaTampaServer();
+  if (!server) return response.status(502).end();
+  const requested = Number.parseInt(String(request.query.bytes || request.query.size || ""), 10);
+  const bytes = Math.max(
+    64 * 1024,
+    Math.min(Number.isFinite(requested) ? requested : 10 * 1024 * 1024, OOKLA_DOWNLOAD_MAX_BYTES)
+  );
+  const base = ooklaServerBase(server);
+  if (!base) return response.status(502).end();
+
+  const controller = new AbortController();
+  const abortTimer = setTimeout(() => controller.abort(), 30_000);
+  const onClientClose = () => controller.abort();
+  request.on("close", onClientClose);
+
+  // Try the modern Ookla path first (/download?size=N). If the server
+  // only speaks the legacy protocol, fall back to the random image
+  // endpoint (which serves ~16 MB of random bytes at 4000x4000).
+  const candidateUrls = [
+    base + "/download?nocache=" + Math.random() + "&size=" + bytes,
+    base + "/speedtest/random4000x4000.jpg?x=" + Math.random()
+  ];
+
+  try {
+    let upstream = null;
+    let lastStatus = 0;
+    for (const url of candidateUrls) {
+      try {
+        upstream = await fetch(url, {
+          headers: { "User-Agent": OOKLA_BROWSER_UA },
+          signal: controller.signal,
+          cache: "no-store"
+        });
+        if (upstream.ok && upstream.body) break;
+        lastStatus = upstream.status;
+        upstream = null;
+      } catch (innerErr) {
+        if (innerErr?.name === "AbortError") throw innerErr;
+        lastStatus = 0;
+      }
+    }
+    if (!upstream) {
+      return response.status(lastStatus || 502).end();
+    }
+
+    response.setHeader("Content-Type", "application/octet-stream");
+    response.setHeader("Cache-Control", "no-store, no-transform");
+    response.setHeader("X-Content-Type-Options", "nosniff");
+    const upstreamLen = upstream.headers.get("content-length");
+    if (upstreamLen) response.setHeader("Content-Length", upstreamLen);
+
+    const reader = upstream.body.getReader();
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!response.write(value)) {
+        await new Promise((resolve) => response.once("drain", resolve));
+      }
+    }
+    response.end();
+  } catch (err) {
+    if (!response.headersSent) response.status(502).end();
+    else { try { response.end(); } catch (_) {} }
+    if (err?.name !== "AbortError") {
+      console.warn("[ookla/download] proxy error", err?.message || err);
+    }
+  } finally {
+    clearTimeout(abortTimer);
+    request.off("close", onClientClose);
+  }
+});
+
+app.post("/api/speedtest/internet/tampa-upload", async (request, response) => {
+  const server = await discoverOoklaTampaServer();
+  if (!server) {
+    return response.status(502).json({ error: "discover failed", detail: ooklaTampaCache.lastError || "unknown" });
+  }
+  const base = ooklaServerBase(server);
+  if (!base) return response.status(502).json({ error: "bad server url" });
+
+  // Buffer first â€” deterministic, no duplex weirdness.
+  let body;
+  try {
+    body = await bufferRequestBody(request, OOKLA_UPLOAD_MAX_BYTES);
+  } catch (err) {
+    const code = err?.code === 413 ? 413 : 400;
+    return response.status(code).json({ error: "buffer failed", detail: String(err?.message || err) });
+  }
+
+  const uploadUrl = base + "/upload?nocache=" + Math.random();
+  const controller = new AbortController();
+  const abortTimer = setTimeout(() => controller.abort(), 60_000);
+
+  try {
+    const upstream = await fetch(uploadUrl, {
+      method: "POST",
+      body,
+      signal: controller.signal,
+      headers: {
+        "Content-Type": request.headers["content-type"] || "application/octet-stream",
+        "User-Agent": OOKLA_BROWSER_UA
+      }
+    });
+    const text = await upstream.text();
+    const match = /size\s*=\s*(\d+)/i.exec(text);
+    response.status(upstream.status >= 200 && upstream.status < 300 ? 200 : 502);
+    response.setHeader("Cache-Control", "no-store");
+    response.setHeader("Content-Type", "application/json");
+    return response.send(JSON.stringify({
+      upstreamStatus: upstream.status,
+      upstreamUrl: uploadUrl,
+      receivedBytes: match ? Number(match[1]) : body.length,
+      sentBytes: body.length,
+      upstreamBody: text.slice(0, 512)
+    }));
+  } catch (err) {
+    const detail = err?.name === "AbortError" ? "upstream timed out" : String(err?.message || err);
+    console.warn("[ookla/upload] proxy error:", detail);
+    if (!response.headersSent) {
+      return response.status(502).json({ error: "upload proxy failed", detail, upstreamUrl: uploadUrl });
+    }
+    try { response.end(); } catch (_) {}
+  } finally {
+    clearTimeout(abortTimer);
+  }
+});
+
+// ----- Internet speed test proxy (via Cloudflare) ------------------------
+//
+// Direct cross-origin fetch to speed.cloudflare.com fails in some browser
+// configurations (CORS preflight on /__up, corporate TLS inspection, etc.).
+// These proxy routes make the browser talk same-origin to Hearthboard, and
+// Hearthboard streams the bytes to/from Cloudflare. Because the LAN hop
+// between client and server is much faster than the ISP uplink, the rate
+// the client can push/pull through the proxy is bottlenecked by the real
+// internet pipe â€” so the measurement still reflects ISP speed.
+
+const CLOUDFLARE_SPEEDTEST_ORIGIN = "https://speed.cloudflare.com";
+const CLOUDFLARE_DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024;    // 100 MB hard cap
+const CLOUDFLARE_UPLOAD_MAX_BYTES = 50 * 1024 * 1024;       // 50 MB hard cap
+
+app.get("/api/speedtest/internet/meta", async (request, response) => {
+  const controller = new AbortController();
+  const abortTimer = setTimeout(() => controller.abort(), 6000);
+  try {
+    const upstream = await fetch(CLOUDFLARE_SPEEDTEST_ORIGIN + "/meta", {
+      signal: controller.signal,
+      cache: "no-store"
+    });
+    if (!upstream.ok) {
+      return response.status(upstream.status).json({ error: "upstream " + upstream.status });
+    }
+    const json = await upstream.json();
+    response.setHeader("Cache-Control", "no-store");
+    return response.json(json);
+  } catch (err) {
+    console.warn("[speedtest/internet/meta] proxy error", err?.message || err);
+    return response.status(502).json({ error: "meta proxy failed" });
+  } finally {
+    clearTimeout(abortTimer);
+  }
+});
+
+app.get("/api/speedtest/internet/download", async (request, response) => {
+  const requested = Number.parseInt(String(request.query.bytes || request.query.size || ""), 10);
+  const bytes = Math.max(
+    64 * 1024,
+    Math.min(Number.isFinite(requested) ? requested : 10 * 1024 * 1024, CLOUDFLARE_DOWNLOAD_MAX_BYTES)
+  );
+
+  const controller = new AbortController();
+  const abortTimer = setTimeout(() => controller.abort(), 30_000);
+  // If the client disconnects, abort upstream so we stop wasting ISP bytes.
+  const onClientClose = () => controller.abort();
+  request.on("close", onClientClose);
+
+  try {
+    const upstream = await fetch(
+      CLOUDFLARE_SPEEDTEST_ORIGIN + "/__down?bytes=" + bytes + "&r=" + Math.random(),
+      { signal: controller.signal, cache: "no-store" }
+    );
+    if (!upstream.ok || !upstream.body) {
+      return response.status(upstream.status || 502).end();
+    }
+
+    response.setHeader("Content-Type", "application/octet-stream");
+    response.setHeader("Cache-Control", "no-store, no-transform");
+    response.setHeader("X-Content-Type-Options", "nosniff");
+    const upstreamLen = upstream.headers.get("content-length");
+    if (upstreamLen) response.setHeader("Content-Length", upstreamLen);
+
+    const reader = upstream.body.getReader();
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (!response.write(value)) {
+        await new Promise((resolve) => response.once("drain", resolve));
+      }
+    }
+    response.end();
+  } catch (err) {
+    if (!response.headersSent) {
+      response.status(502).end();
+    } else {
+      try { response.end(); } catch (_) {}
+    }
+    if (err?.name !== "AbortError") {
+      console.warn("[speedtest/internet/download] proxy error", err?.message || err);
+    }
+  } finally {
+    clearTimeout(abortTimer);
+    request.off("close", onClientClose);
+  }
+});
+
+// Buffered upload proxy. We read the body into memory (capped), then
+// POST it to Cloudflare. Buffering is ~80 ms slower than streaming on
+// a gigabit LAN hop, but the streaming path (Readable.toWeb + duplex
+// half) has a long history of silently hanging. We trade a tiny bit of
+// accuracy for a proxy that actually works.
+app.post("/api/speedtest/internet/upload", async (request, response) => {
+  let body;
+  try {
+    body = await bufferRequestBody(request, CLOUDFLARE_UPLOAD_MAX_BYTES);
+  } catch (err) {
+    const code = err?.code === 413 ? 413 : 400;
+    return response.status(code).json({ error: "buffer failed", detail: String(err?.message || err) });
+  }
+
+  const controller = new AbortController();
+  const abortTimer = setTimeout(() => controller.abort(), 60_000);
+
+  try {
+    const upstream = await fetch(CLOUDFLARE_SPEEDTEST_ORIGIN + "/__up", {
+      method: "POST",
+      body,
+      signal: controller.signal,
+      headers: {
+        "Content-Type": request.headers["content-type"] || "application/octet-stream"
+      }
+    });
+    const text = await upstream.text();
+    response.status(upstream.status >= 200 && upstream.status < 300 ? 200 : 502);
+    response.setHeader("Cache-Control", "no-store");
+    response.setHeader("Content-Type", "application/json");
+    return response.send(JSON.stringify({
+      upstreamStatus: upstream.status,
+      receivedBytes: body.length,
+      sentBytes: body.length,
+      upstreamBody: text.slice(0, 512)
+    }));
+  } catch (err) {
+    const detail = err?.name === "AbortError" ? "upstream timed out" : String(err?.message || err);
+    console.warn("[speedtest/internet/upload] proxy error:", detail);
+    if (!response.headersSent) {
+      return response.status(502).json({ error: "upload proxy failed", detail });
+    }
+    try { response.end(); } catch (_) {}
+  } finally {
+    clearTimeout(abortTimer);
+  }
+});
+
+app.get("/api/speedtest/download", (request, response) => {
+  const requested = Number.parseInt(String(request.query.size || ""), 10);
+  const size = Math.max(
+    64 * 1024,
+    Math.min(Number.isFinite(requested) ? requested : 5 * 1024 * 1024, SPEEDTEST_DOWNLOAD_MAX_BYTES)
+  );
+  const pad = getSpeedtestPad();
+  // Slice â€” offset rotates so caches never help us (which they shouldn't
+  // anyway since we set no-store below).
+  const offset = Math.floor(Math.random() * (pad.length - size));
+  const slice = pad.subarray(offset, offset + size);
+
+  response.setHeader("Content-Type", "application/octet-stream");
+  response.setHeader("Content-Length", String(size));
+  response.setHeader("Cache-Control", "no-store, no-transform");
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.end(slice);
+});
+
+// For upload measurement: client posts N random bytes, we read them off
+// the wire and respond with how many bytes we received. express.raw
+// gives us a buffered Buffer â€” that's fine at 10 MB, and it's simpler
+// than a streaming byte counter.
+const speedtestUploadParser = express.raw({
+  type: () => true,
+  limit: SPEEDTEST_UPLOAD_MAX_BYTES
+});
+app.post("/api/speedtest/upload", speedtestUploadParser, (request, response) => {
+  const received = Buffer.isBuffer(request.body) ? request.body.length : 0;
+  response.setHeader("Cache-Control", "no-store");
+  response.json({ receivedBytes: received, serverReceivedAt: Date.now() });
+});
+
+app.post("/api/speedtest/results", async (request, response) => {
+  const body = request.body || {};
+  const user = authenticatedUser(request);
+  const machinePush = requestHasValidSpeedtestPushKey(request) || requestIsLocalMachine(request);
+  try {
+    const entry = await recordSpeedtestResult({
+      downloadMbps: body.downloadMbps,
+      uploadMbps: body.uploadMbps,
+      latencyMs: body.latencyMs,
+      userId: user?.id || null,
+      client: machinePush
+        ? (typeof body.client === "string" ? body.client : "") || (requestIsLan(request) ? "lan" : "remote")
+        : (requestIsLan(request) ? "lan" : "remote"),
+      source: body.source,
+      target: body.target,
+      serverLocation: body.serverLocation,
+      runner: machinePush ? body.runner : null
+    });
+    return response.status(201).json({ result: entry });
+  } catch (err) {
+    return response.status(400).json({ error: String(err?.message || err) });
+  }
+});
+
+// Windows are relative: last N milliseconds. The chart asks for a window
+// keyword; everything else is just epoch arithmetic. Results are returned
+// oldest-first so the chart can plot straight through.
+const SPEEDTEST_WINDOWS = {
+  "15m": 15 * 60_000,
+  "1h": 60 * 60_000,
+  "24h": 24 * 60 * 60_000,
+  "7d": 7 * 24 * 60 * 60_000,
+  "30d": 30 * 24 * 60 * 60_000
+};
+// Parse a timestamp from either epoch ms (string or number) or ISO 8601.
+function parseHistoryStamp(value) {
+  if (value === null || value === undefined || value === "") return NaN;
+  const asNum = Number(value);
+  if (Number.isFinite(asNum) && asNum > 1_000_000_000_000) return asNum;
+  const iso = Date.parse(String(value));
+  return Number.isFinite(iso) ? iso : NaN;
+}
+
+app.get("/api/speedtest/history", (request, response) => {
+  // Two ways to ask: either `window=<key>` (relative) or `from` + `to`
+  // (absolute epoch ms or ISO). Absolute wins if both from AND to are
+  // valid, so the chart's "Custom" range works.
+  const windowKey = String(request.query.window || "1h").toLowerCase();
+  const windowMs = SPEEDTEST_WINDOWS[windowKey] || SPEEDTEST_WINDOWS["1h"];
+
+  const fromParam = parseHistoryStamp(request.query.from);
+  const toParam = parseHistoryStamp(request.query.to);
+  let rangeStart;
+  let rangeEnd;
+  let resolvedWindow = windowKey;
+  if (Number.isFinite(fromParam) && Number.isFinite(toParam) && toParam > fromParam) {
+    rangeStart = fromParam;
+    rangeEnd = toParam;
+    resolvedWindow = "custom";
+  } else {
+    rangeEnd = Date.now();
+    rangeStart = rangeEnd - windowMs;
+  }
+
+  // Optional source filter â€” "internet", "lan", or "all".
+  const sourceFilter = String(request.query.source || "all").toLowerCase();
+  const allowedSources = new Set(["internet", "lan", "custom"]);
+  const machineFilter = String(request.query.machine || "all").toLowerCase();
+  const allowedMachines = new Set(["all", "pi", "desktop"]);
+
+  function speedtestMachine(entry) {
+    const client = String(entry?.client || "").trim().toLowerCase();
+    const runner = String(entry?.runner || "").trim().toLowerCase();
+    if (client === "desktop" || /desktop|jody/.test(runner)) {
+      return "desktop";
+    }
+    if (client === "server" || /hearthboard pi|\bpi\b/.test(runner)) {
+      return "pi";
+    }
+    return "other";
+  }
+
+  const list = db.data.speedtestResults
+    .filter((entry) => {
+      const ts = Date.parse(entry?.ts || "");
+      if (!(ts >= rangeStart && ts <= rangeEnd)) return false;
+      if (sourceFilter !== "all" && allowedSources.has(sourceFilter)) {
+        // Legacy entries (pre-source-field) were always LAN throughput
+        // measurements â€” treat them as lan so they don't pollute the
+        // Internet chart with multi-Gbps LAN numbers. Only rows that
+        // explicitly recorded source === "internet" count there.
+        const entrySource = typeof entry?.source === "string" && entry.source
+          ? entry.source
+          : "lan";
+        if (entrySource !== sourceFilter) return false;
+      }
+      if (allowedMachines.has(machineFilter) && machineFilter !== "all") {
+        if (speedtestMachine(entry) !== machineFilter) return false;
+      }
+      return true;
+    })
+    .sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
+
+  // Summary for the live cards.
+  const latest = list[list.length - 1] || null;
+  let avgDl = 0, avgUl = 0, avgLat = 0;
+  if (list.length) {
+    for (const e of list) {
+      avgDl += e.downloadMbps;
+      avgUl += e.uploadMbps;
+      avgLat += e.latencyMs;
+    }
+    avgDl /= list.length;
+    avgUl /= list.length;
+    avgLat /= list.length;
+  }
+
+  response.setHeader("Cache-Control", "no-store");
+  return response.json({
+    window: resolvedWindow,
+    windowMs: rangeEnd - rangeStart,
+    from: new Date(rangeStart).toISOString(),
+    to: new Date(rangeEnd).toISOString(),
+    count: list.length,
+    latest,
+    averages: {
+      downloadMbps: Number(avgDl.toFixed(2)),
+      uploadMbps: Number(avgUl.toFixed(2)),
+      latencyMs: Number(avgLat.toFixed(1))
+    },
+    results: list
+  });
+});
+
+async function runBackgroundInternetSpeedtest() {
+  if (speedtestBackgroundRunning) {
+    return;
+  }
+
+  speedtestBackgroundRunning = true;
+  try {
+    const sample = await runInternetSpeedTest({ profile: "background" });
+    const entry = await recordSpeedtestResult({
+      ...sample,
+      client: "server",
+      runner: SPEEDTEST_BACKGROUND_RUNNER_LABEL
+    });
+    console.log(
+      `[speedtest] background sample saved (${entry.downloadMbps} down / ${entry.uploadMbps} up / ${entry.latencyMs} ms).`
+    );
+  } catch (err) {
+    console.warn("[speedtest] background sample failed:", err?.message || err);
+  } finally {
+    speedtestBackgroundRunning = false;
+  }
+}
+
+function startBackgroundSpeedtestScheduler() {
+  if (speedtestBackgroundTimer || SPEEDTEST_BACKGROUND_INTERVAL_MS <= 0) {
+    return;
+  }
+
+  setTimeout(() => {
+    runBackgroundInternetSpeedtest().catch(() => {});
+  }, SPEEDTEST_BACKGROUND_INITIAL_DELAY_MS);
+
+  speedtestBackgroundTimer = setInterval(() => {
+    runBackgroundInternetSpeedtest().catch(() => {});
+  }, SPEEDTEST_BACKGROUND_INTERVAL_MS);
+
+  console.log(
+    `[speedtest] background scheduler armed (${Math.round(SPEEDTEST_BACKGROUND_INTERVAL_MS / 60_000)} min interval).`
+  );
+}
+
+// ========================================================================
+
 app.patch("/api/admin/visibility", async (request, response) => {
   if (!requestIsAdmin(request)) {
     return response.status(403).json({ error: "Only the admin account can change visibility settings." });
@@ -4338,6 +6406,7 @@ app.patch("/api/admin/visibility", async (request, response) => {
 
   const nextPages = request.body?.pageVisibility;
   const nextLibraries = request.body?.libraryVisibility;
+  const nextLibrarySourceSettings = request.body?.librarySourceSettings;
 
   if (nextPages && typeof nextPages === "object") {
     for (const pageKey of PAGE_KEYS) {
@@ -4364,11 +6433,31 @@ app.patch("/api/admin/visibility", async (request, response) => {
     }
   }
 
+  if (nextLibrarySourceSettings && typeof nextLibrarySourceSettings === "object") {
+    for (const library of mediaLibraries) {
+      if (!library.preferredPath) {
+        continue;
+      }
+      const previous = mediaLibraryPreferredSourceEnabled(library);
+      const next = normalizeLibrarySourceSettingsEntry(library, nextLibrarySourceSettings[library.id]);
+      db.data.security.librarySourceSettings[library.id] = next;
+      if (previous !== next.preferredEnabled) {
+        invalidateMediaLibraryRootCache(library.id);
+        invalidateMediaLibraryCache(library.id);
+      }
+    }
+  }
+
   await db.write();
   return response.json({
     ok: true,
     pageVisibility: Object.fromEntries(PAGE_KEYS.map((pageKey) => [pageKey, pageVisibility(pageKey)])),
-    libraryVisibility: Object.fromEntries(mediaLibraries.map((library) => [library.id, libraryVisibility(library)]))
+    libraryVisibility: Object.fromEntries(mediaLibraries.map((library) => [library.id, libraryVisibility(library)])),
+    librarySourceSettings: Object.fromEntries(
+      mediaLibraries
+        .filter((library) => library.preferredPath)
+        .map((library) => [library.id, normalizeLibrarySourceSettingsEntry(library, db.data.security.librarySourceSettings?.[library.id])])
+    )
   });
 });
 
@@ -4475,7 +6564,7 @@ app.get("/api/mobile/reminders", (request, response) => {
     return response.status(401).json({ error: "Sign in to sync mobile reminders." });
   }
 
-  // Respect "Task finished" — if the user marked an event complete, the mobile
+  // Respect "Task finished" â€” if the user marked an event complete, the mobile
   // bridge / service worker must stop firing pushes for it.
   const completedIds = completedEventIdSet(user.id);
   const reminders = upcomingReminderEntriesForUser(user).filter(
@@ -4510,24 +6599,17 @@ app.get("/api/media/browse", async (request, response) => {
   }
 
   const requestedPath = String(request.query.path || "");
-  const resolvedPath = resolveMediaPath(library, requestedPath);
-  if (!resolvedPath) {
-    return response.status(400).json({ error: "Invalid media path." });
+  const directory = await statMediaLocation(library, requestedPath, { expectedType: "directory" });
+  if (directory.error) {
+    return response.status(directory.status || 404).json({
+      error: typeof directory.error === "string" ? directory.error : "Folder not found."
+    });
   }
 
   const mediaType = normalizeMediaTypeFilter(request.query.type);
   const page = normalizePageNumber(request.query.page);
   const pageSize = normalizePageSize(request.query.pageSize);
-  let directoryStat;
-  try {
-    directoryStat = await stat(resolvedPath);
-  } catch {
-    return response.status(404).json({ error: "Folder not found." });
-  }
-
-  if (!directoryStat.isDirectory()) {
-    return response.status(400).json({ error: "Requested path is not a folder." });
-  }
+  const resolvedPath = directory.resolvedPath;
 
   const listing = await describeDirectory(library, resolvedPath);
   const collectedFiles = await collectMediaFiles(library, resolvedPath, { type: mediaType });
@@ -4578,10 +6660,13 @@ app.get("/api/media/search", async (request, response) => {
   const page = normalizePageNumber(request.query.page);
   const pageSize = normalizePageSize(request.query.pageSize);
   const requestedPath = String(request.query.path || "");
-  const resolvedPath = resolveMediaPath(library, requestedPath);
-  if (!resolvedPath) {
-    return response.status(400).json({ error: "Invalid media path." });
+  const directory = await statMediaLocation(library, requestedPath, { expectedType: "directory" });
+  if (directory.error) {
+    return response.status(directory.status || 404).json({
+      error: typeof directory.error === "string" ? directory.error : "Folder not found."
+    });
   }
+  const resolvedPath = directory.resolvedPath;
 
   const results = await collectMediaFiles(library, resolvedPath, { query, type: mediaType });
   const paginatedResults = paginateMedia(results, page, pageSize);
@@ -4615,24 +6700,15 @@ app.post("/api/media/view", async (request, response) => {
   }
 
   const relativePath = String(request.body?.path || "");
-  const resolvedPath = resolveMediaPath(library, relativePath);
-  if (!resolvedPath) {
-    return response.status(400).json({ error: "Invalid media path." });
+  const file = await statMediaLocation(library, relativePath, { expectedType: "file" });
+  if (file.error) {
+    return response.status(file.status || 404).json({
+      error: typeof file.error === "string" ? file.error : "Media file not found."
+    });
   }
 
-  let fileStat;
-  try {
-    fileStat = await stat(resolvedPath);
-  } catch {
-    return response.status(404).json({ error: "Media file not found." });
-  }
-
-  if (!fileStat.isFile()) {
-    return response.status(404).json({ error: "Media file not found." });
-  }
-
-  const next = upsertMediaView(library.id, relativeMediaPath(library, resolvedPath));
-  // View counts are high-frequency but low-stakes — a debounced flush is fine,
+  const next = upsertMediaView(library.id, relativeMediaPath(library, file.resolvedPath));
+  // View counts are high-frequency but low-stakes â€” a debounced flush is fine,
   // and the response already returns the fresh in-memory count either way.
   requestDbWrite();
   return response.json({
@@ -5077,7 +7153,7 @@ app.post("/api/media/move", async (request, response) => {
   await mkdir(path.dirname(destinationBase), { recursive: true });
   const destinationPath = await uniqueDestinationPath(destinationBase);
   await moveFilePreservingContents(file.resolvedPath, destinationPath);
-  await pruneEmptyDirectories(path.dirname(file.resolvedPath), sourceLibrary.path);
+  await pruneEmptyDirectories(path.dirname(file.resolvedPath), file.rootState?.activePath || sourceLibrary.path);
   invalidateMediaLibraryCache(sourceLibrary.id);
   invalidateMediaLibraryCache(targetLibrary.id);
 
@@ -5086,7 +7162,7 @@ app.post("/api/media/move", async (request, response) => {
     sourceLibrary: sourceLibrary.id,
     targetLibrary: targetLibrary.id,
     sourcePath: relativePath,
-    targetPath: path.relative(targetLibrary.path, destinationPath).split(path.sep).join("/")
+    targetPath: relativePathFromLibrary(targetLibrary, destinationPath)
   });
 });
 
@@ -5100,22 +7176,16 @@ app.get(/^\/media\/([^/]+)(?:\/(.*))?$/, async (request, response) => {
     return;
   }
 
-  const resolvedPath = resolveMediaPath(library, request.params[1] || "");
-  if (!resolvedPath) {
-    return response.status(400).send("Invalid media path.");
+  const sourcePreference = normalizeMediaSourcePreference(request.query.source);
+  const file = await statMediaLocation(library, request.params[1] || "", {
+    expectedType: "file",
+    sourcePreference
+  });
+  if (file.error) {
+    return response.status(file.status || 404).send(typeof file.error === "string" ? file.error : "Media file not found.");
   }
 
-  let fileStat;
-  try {
-    fileStat = await stat(resolvedPath);
-  } catch {
-    return response.status(404).send("Media file not found.");
-  }
-
-  if (!fileStat.isFile()) {
-    return response.status(404).send("Media file not found.");
-  }
-
+  const resolvedPath = file.resolvedPath;
   const mediaType = mediaTypeForExtension(path.extname(resolvedPath));
   if (!isServableMediaExtension(path.extname(resolvedPath))) {
     return response.status(403).send("File type is not exposed.");
@@ -5123,6 +7193,9 @@ app.get(/^\/media\/([^/]+)(?:\/(.*))?$/, async (request, response) => {
 
   response.setHeader("X-Content-Type-Options", "nosniff");
   response.setHeader("Cache-Control", "private, max-age=3600");
+  if (String(request.query.download || "").trim() === "1") {
+    response.attachment(path.basename(resolvedPath));
+  }
   if (mediaType === "panorama") {
     response.setHeader("Content-Security-Policy", "default-src 'self' data: blob: https:; img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https:; style-src 'self' 'unsafe-inline' https:; frame-ancestors 'self'; sandbox allow-scripts allow-same-origin");
   }
@@ -5141,22 +7214,13 @@ app.get(/^\/media-thumb\/([^/]+)(?:\/(.*))?$/, async (request, response) => {
   }
 
   const relativePath = request.params[1] || "";
-  const resolvedPath = resolveMediaPath(library, relativePath);
-  if (!resolvedPath) {
-    return response.status(400).send("Invalid media path.");
+  const file = await statMediaLocation(library, relativePath, { expectedType: "file" });
+  if (file.error) {
+    return response.status(file.status || 404).send(typeof file.error === "string" ? file.error : "Media thumbnail not found.");
   }
 
-  let fileStat;
-  try {
-    fileStat = await stat(resolvedPath);
-  } catch {
-    return response.status(404).send("Media file not found.");
-  }
-
-  if (!fileStat.isFile()) {
-    return response.status(404).send("Media thumbnail not found.");
-  }
-
+  const resolvedPath = file.resolvedPath;
+  const fileStat = file.fileStat;
   const mediaType = mediaTypeForExtension(path.extname(resolvedPath));
   if (!["image", "video"].includes(mediaType)) {
     return response.status(404).send("Media thumbnail not found.");
@@ -5234,7 +7298,7 @@ app.get("/login", (_request, response) => {
 });
 
 app.get("/access", (request, response) => {
-  const nextPath = String(request.query?.next || "/");
+  const nextPath = normalizeInternalPath(request.query?.next || "/", "/");
   response.redirect(loginRedirectUrl(request, nextPath));
 });
 
@@ -5250,6 +7314,14 @@ app.get("/notifications", (_request, response) => {
   sendHtmlShell(response, "notifications.html");
 });
 
+app.get("/messages", (_request, response) => {
+  sendHtmlShell(response, "messages.html");
+});
+
+app.get("/stats", (_request, response) => {
+  sendHtmlShell(response, "stats.html");
+});
+
 app.use((request, response, next) => {
   if (request.path.startsWith("/api/") || request.method !== "GET") {
     return next();
@@ -5261,4 +7333,29 @@ app.use((request, response, next) => {
 app.listen(PORT, HOST, () => {
   console.log(`Hearthboard is running on http://${HOST}:${PORT}`);
   warmMediaIndexes();
+  startBackgroundSpeedtestScheduler();
+
+  // Start the twice-daily (00:00 + 12:00 local) calendar sync scheduler.
+  // We only start it if token encryption + at least one provider are
+  // configured â€” otherwise we'd just be logging errors every cycle.
+  if (
+    isEncryptionConfigured() &&
+    (googleIntegration.isConfigured() || microsoftIntegration.isConfigured())
+  ) {
+    try {
+      startIntegrationScheduler(db, {
+        timezone: APP_TIMEZONE,
+        log: (msg) => console.log(msg)
+      });
+      console.log(`[integrations] scheduler armed for ${APP_TIMEZONE} (00:00 + 12:00 daily).`);
+    } catch (err) {
+      console.error("[integrations] scheduler failed to start:", err?.message || err);
+    }
+  } else {
+    console.log(
+      "[integrations] scheduler idle â€” set INTEGRATION_TOKEN_ENCRYPTION_KEY + at least one " +
+        "provider's OAuth credentials in .env to enable."
+    );
+  }
 });
+

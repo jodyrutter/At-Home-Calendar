@@ -42,7 +42,8 @@ const elements = {
   deleteEvent: document.querySelector("#delete-event"),
   resetButton: document.querySelector("#reset-event-form"),
   saveButton: document.querySelector("#save-event-button"),
-  backLink: document.querySelector("#event-studio-back")
+  backLink: document.querySelector("#event-studio-back"),
+  importNote: document.querySelector("#event-import-note")
 };
 
 function toDateKey(date) {
@@ -292,6 +293,24 @@ function applyStudioMode(eventItem = null) {
   elements.title.textContent = editing ? "Edit event" : "Add event";
   elements.deleteEvent.hidden = !editing;
   elements.dateHeading.textContent = editing ? eventItem.title : formatDayLabel(state.selectedDate);
+
+  // If this event was imported from Google/Outlook, show a note warning the
+  // user that any edits will be overwritten on the next sync. The user picked
+  // "editable, overwritten on sync" semantics, so we surface that trade-off.
+  if (elements.importNote) {
+    const provider = editing ? eventItem?.source?.provider : null;
+    if (provider === "google" || provider === "microsoft") {
+      const label = provider === "google" ? "Google Calendar" : "Outlook Calendar";
+      elements.importNote.textContent =
+        `This event was imported from ${label}. You can edit it here, but your changes will be overwritten the next time Hearthboard syncs (noon and midnight).`;
+      elements.importNote.hidden = false;
+      elements.importNote.classList.toggle("source-microsoft", provider === "microsoft");
+    } else {
+      elements.importNote.hidden = true;
+      elements.importNote.textContent = "";
+      elements.importNote.classList.remove("source-microsoft");
+    }
+  }
 }
 
 function populateForm(eventItem) {

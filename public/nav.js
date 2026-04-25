@@ -26,6 +26,18 @@ function setBellCount(button, count) {
   badge.textContent = unread > 99 ? "99+" : String(unread);
 }
 
+// Same as setBellCount but for the chat bubble; kept separate so the
+// selectors are self-documenting if we ever diverge their behaviors.
+function setMessagesCount(button, count) {
+  const badge = button?.querySelector("[data-nav-messages-count]");
+  if (!badge) {
+    return;
+  }
+  const unread = Math.max(0, Number.parseInt(String(count || "0"), 10) || 0);
+  badge.hidden = unread === 0;
+  badge.textContent = unread > 99 ? "99+" : String(unread);
+}
+
 function applyAvatar(button, avatar, username = "") {
   if (!button) {
     return;
@@ -57,6 +69,7 @@ async function loadNav() {
   }
 
   const bell = navRoot.querySelector("[data-nav-bell]");
+  const messages = navRoot.querySelector("[data-nav-messages]");
   const avatar = navRoot.querySelector("[data-nav-avatar]");
   const login = navRoot.querySelector("[data-nav-login]");
   const activePage = navRoot.dataset.activePage || "";
@@ -72,6 +85,12 @@ async function loadNav() {
       setBellCount(bell, payload.unreadNotifications || 0);
     }
 
+    if (messages) {
+      messages.hidden = !authenticated;
+      messages.classList.toggle("is-active", activePage === "messages");
+      setMessagesCount(messages, payload.unreadMessages || 0);
+    }
+
     if (avatar) {
       avatar.hidden = !authenticated;
       avatar.classList.toggle("is-active", activePage === "account");
@@ -84,6 +103,9 @@ async function loadNav() {
   } catch {
     if (bell) {
       bell.hidden = true;
+    }
+    if (messages) {
+      messages.hidden = true;
     }
     if (avatar) {
       avatar.hidden = true;

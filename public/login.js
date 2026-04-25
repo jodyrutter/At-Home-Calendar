@@ -1,8 +1,23 @@
 const searchParams = new URLSearchParams(window.location.search);
 const isEmbeddedMobileApp = window.self !== window.top || searchParams.get("mobileApp") === "1";
 
+function normalizeInternalPath(pathname) {
+  try {
+    const url = new URL(pathname || "/account", window.location.origin);
+    if (url.origin !== window.location.origin) {
+      return "/account";
+    }
+    if (!/^\/(?!\/)/.test(url.pathname || "/")) {
+      return "/account";
+    }
+    return `${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return "/account";
+  }
+}
+
 function pathWithMobileApp(pathname) {
-  const url = new URL(pathname || "/account", window.location.origin);
+  const url = new URL(normalizeInternalPath(pathname || "/account"), window.location.origin);
   if (isEmbeddedMobileApp) {
     url.searchParams.set("mobileApp", "1");
   }
@@ -10,7 +25,7 @@ function pathWithMobileApp(pathname) {
   return `${url.pathname}${url.search}${url.hash}`;
 }
 
-const nextUrl = pathWithMobileApp(searchParams.get("next") || "/account");
+const nextUrl = pathWithMobileApp(normalizeInternalPath(searchParams.get("next") || "/account"));
 
 const elements = {
   copy: document.querySelector("#login-copy"),

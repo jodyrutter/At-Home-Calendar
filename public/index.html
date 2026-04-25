@@ -16,18 +16,42 @@
         <a class="nav-brand" href="/">Hearthboard</a>
         <div class="nav-tools">
           <div class="nav-links">
-            <a class="nav-link is-active" href="/">Calendar</a>
-            <a class="nav-link" href="/gallery">Gallery</a>
-            <a class="nav-link" href="/assistant">Jody AI</a>
+            <a class="nav-link-icon is-active" href="/" data-tooltip="Calendar" aria-label="Calendar">
+              <svg viewBox="0 0 24 24" role="presentation" focusable="false">
+                <path d="M7 2a1 1 0 0 1 1 1v1h8V3a1 1 0 1 1 2 0v1h1a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h1V3a1 1 0 0 1 1-1Zm12 8H5v9h14v-9Zm-10 2h2v2H9v-2Zm4 0h2v2h-2v-2Zm4 0h2v2h-2v-2Zm-8 4h2v2H9v-2Zm4 0h2v2h-2v-2Z"></path>
+              </svg>
+            </a>
+            <a class="nav-link-icon" href="/gallery" data-tooltip="Gallery" aria-label="Gallery">
+              <svg viewBox="0 0 24 24" role="presentation" focusable="false">
+                <path d="M5 4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2H5Zm14 2v8.5l-3.3-3.3a1 1 0 0 0-1.4 0L10 15.6l-2.3-2.3a1 1 0 0 0-1.4 0L5 14.6V6h14ZM8 9.5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0Z"></path>
+              </svg>
+            </a>
+            <a class="nav-link-icon" href="/assistant" data-tooltip="Jody AI" aria-label="Jody AI">
+              <svg viewBox="0 0 24 24" role="presentation" focusable="false">
+                <path d="M12 2c.45 0 .85.3.97.74l1.4 4.53a3 3 0 0 0 1.96 1.96l4.53 1.4a1 1 0 0 1 0 1.92l-4.53 1.4a3 3 0 0 0-1.96 1.96l-1.4 4.53a1.01 1.01 0 0 1-1.94 0l-1.4-4.53a3 3 0 0 0-1.96-1.96l-4.53-1.4a1 1 0 0 1 0-1.92l4.53-1.4a3 3 0 0 0 1.96-1.96l1.4-4.53A1 1 0 0 1 12 2Z"></path>
+                <path d="M19.5 2.5c.22 0 .42.15.48.37l.4 1.25a1 1 0 0 0 .6.6l1.25.4a.5.5 0 0 1 0 .96l-1.25.4a1 1 0 0 0-.6.6l-.4 1.25a.5.5 0 0 1-.96 0l-.4-1.25a1 1 0 0 0-.6-.6l-1.25-.4a.5.5 0 0 1 0-.96l1.25-.4a1 1 0 0 0 .6-.6l.4-1.25a.5.5 0 0 1 .48-.37Z"></path>
+              </svg>
+            </a>
+            <a class="nav-link-icon" href="/stats" data-tooltip="Stats" aria-label="Stats">
+              <svg viewBox="0 0 24 24" role="presentation" focusable="false">
+                <path d="M12 4a9 9 0 0 0-8.48 12.03 1 1 0 0 0 .94.67h15.08a1 1 0 0 0 .94-.67A9 9 0 0 0 12 4Zm6.83 10H5.17a7 7 0 1 1 13.66 0Zm-3.52-4.3a1 1 0 0 1 0 1.41l-2.51 2.51a1.5 1.5 0 1 1-1.41-1.41l2.51-2.51a1 1 0 0 1 1.41 0Z"></path>
+              </svg>
+            </a>
           </div>
           <div class="nav-actions">
-            <a class="nav-icon-button" href="/notifications" data-nav-bell hidden aria-label="Notifications">
+            <a class="nav-icon-button" href="/notifications" data-nav-bell data-tooltip="Notifications" hidden aria-label="Notifications">
               <span class="nav-icon-badge" data-nav-notification-count hidden></span>
               <svg viewBox="0 0 24 24" role="presentation" focusable="false">
                 <path d="M12 3a5 5 0 0 0-5 5v2.3c0 .7-.2 1.3-.6 1.8L5 14.1V16h14v-1.9l-1.4-2a3 3 0 0 1-.6-1.8V8a5 5 0 0 0-5-5Zm0 19a3 3 0 0 1-2.8-2h5.6A3 3 0 0 1 12 22Z"></path>
               </svg>
             </a>
-            <a class="nav-avatar-button" href="/account" data-nav-avatar hidden aria-label="Account">
+            <a class="nav-icon-button" href="/messages" data-nav-messages data-tooltip="Messages" hidden aria-label="Messages">
+              <span class="nav-icon-badge" data-nav-messages-count hidden></span>
+              <svg viewBox="0 0 24 24" role="presentation" focusable="false">
+                <path d="M4 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8l-4 4V5Z"></path>
+              </svg>
+            </a>
+            <a class="nav-avatar-button" href="/account" data-nav-avatar data-tooltip="Account" hidden aria-label="Account">
               <span data-nav-avatar-fallback>H</span>
               <img data-nav-avatar-image alt="" hidden />
             </a>

@@ -30,7 +30,7 @@ function Write-TrayLog {
     $stamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
     Add-Content -Path $logPath -Value "[$stamp] [$Level] $Message" -ErrorAction SilentlyContinue
   } catch {
-    # Swallow — logging must never kill the tray.
+    # Swallow -- logging must never kill the tray.
   }
 }
 
@@ -85,13 +85,23 @@ $policyEndpoint = "$baseUrl/api/local-ai/policy"
 $assistantUrl = "https://127.0.0.1:42069/assistant"
 
 # Default game process names (no .exe suffix, case-insensitive). Covers the
-# League of Legends client, the game itself, and a few friends.
+# League of Legends client (only runs when you've opened it to queue up),
+# the game itself, and a few other friends.
+#
+# IMPORTANT: we deliberately do NOT include "RiotClientServices" or
+# "RiotClientUx". Those are the background Riot tray app that runs 24/7
+# after you install any Riot game, even when you aren't playing -- if we
+# keyed off them, Jody AI would be restricted permanently just because
+# Riot sits in your system tray. Any time you actually queue a game,
+# LeagueClient/LeagueClientUx spin up and we pick it up from there.
+$excludedGameProcesses = @(
+  "RiotClientServices",
+  "RiotClientUx"
+)
 $defaultGameProcesses = @(
   "LeagueClient",
   "LeagueClientUx",
   "League of Legends",
-  "RiotClientServices",
-  "RiotClientUx",
   "VALORANT",
   "VALORANT-Win64-Shipping",
   "csgo",
@@ -125,6 +135,30 @@ function Get-TraySettings {
     }
     if (-not $parsed.PSObject.Properties.Match("gameProcessNames").Count -or -not $parsed.gameProcessNames) {
       $parsed | Add-Member -NotePropertyName gameProcessNames -NotePropertyValue $defaultGameProcesses -Force
+    } else {
+      # Strip excluded processes that a previous version of this script
+      # may have persisted (e.g. RiotClientServices / RiotClientUx, which
+      # just sit in the tray 24/7 and were causing false-positive gaming
+      # restrictions). Compare case-insensitively.
+      $cleaned = @($parsed.gameProcessNames | Where-Object {
+        $name = [string]$_
+        $excludedGameProcesses -notcontains $name -and
+        ($excludedGameProcesses | Where-Object { $_ -ieq $name } | Measure-Object).Count -eq 0
+      })
+      if ($cleaned.Count -ne @($parsed.gameProcessNames).Count) {
+        $removed = @($parsed.gameProcessNames | Where-Object {
+          $name = [string]$_
+          ($excludedGameProcesses | Where-Object { $_ -ieq $name } | Measure-Object).Count -gt 0
+        }) -join ", "
+        Write-TrayLog "Pruned always-on processes from saved settings: $removed"
+        $parsed.gameProcessNames = $cleaned
+        # Persist the cleaned list so we don't have to re-prune every boot.
+        try {
+          ($parsed | ConvertTo-Json -Depth 5) | Set-Content -Path $settingsPath -Encoding UTF8
+        } catch {
+          Write-TrayLog "Failed to persist pruned settings: $($_.Exception.Message)" "warn"
+        }
+      }
     }
     return $parsed
   } catch {
@@ -144,6 +178,122 @@ function Save-TraySettings {
 
 $script:settings = Get-TraySettings
 Write-TrayLog "Settings loaded. autoRestrictWhileGaming=$($script:settings.autoRestrictWhileGaming)"
+
+# ---------- Ollama LAN reachability -----------------------------------------
+$ollamaHost = "0.0.0.0:11434"
+$ollamaLanPort = 11434
+$ollamaAllowedRemoteIp = "192.168.1.220"
+$ollamaFirewallRuleName = "Hearthboard Ollama from Pi"
+
+function Get-OllamaExePath {
+  $running = Get-Process ollama -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($running -and $running.Path -and (Test-Path $running.Path)) {
+    return $running.Path
+  }
+
+  $command = Get-Command ollama -ErrorAction SilentlyContinue
+  if ($command -and $command.Source -and (Test-Path $command.Source)) {
+    return $command.Source
+  }
+
+  $fallback = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
+  if (Test-Path $fallback) {
+    return $fallback
+  }
+
+  return $null
+}
+
+function Get-OllamaListenerAddresses {
+  try {
+    return @(Get-NetTCPConnection -LocalPort $ollamaLanPort -State Listen -ErrorAction Stop |
+      Select-Object -ExpandProperty LocalAddress -Unique)
+  } catch {
+    Write-TrayLog "Could not inspect Ollama listener addresses: $($_.Exception.Message)" "warn"
+    return @()
+  }
+}
+
+function Ensure-OllamaFirewallRule {
+  try {
+    $existing = Get-NetFirewallRule -DisplayName $ollamaFirewallRuleName -ErrorAction SilentlyContinue
+    if (-not $existing) {
+      New-NetFirewallRule `
+        -DisplayName $ollamaFirewallRuleName `
+        -Direction Inbound `
+        -Action Allow `
+        -Protocol TCP `
+        -LocalPort $ollamaLanPort `
+        -RemoteAddress $ollamaAllowedRemoteIp `
+        -Profile Private `
+        -Program (Get-OllamaExePath) `
+        | Out-Null
+      Write-TrayLog "Created firewall rule '$ollamaFirewallRuleName' for ${ollamaAllowedRemoteIp}:$ollamaLanPort"
+    }
+  } catch {
+    Write-TrayLog "Could not ensure Ollama firewall rule (non-fatal): $($_.Exception.Message)" "warn"
+  }
+}
+
+function Restart-OllamaForLan {
+  $ollamaExe = Get-OllamaExePath
+  if (-not $ollamaExe) {
+    Write-TrayLog "Ollama executable not found; cannot restart for LAN binding." "warn"
+    return $false
+  }
+
+  try {
+    Get-Process ollama -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+  } catch {
+    Write-TrayLog "Could not stop existing Ollama process cleanly: $($_.Exception.Message)" "warn"
+  }
+
+  $command = 'set "OLLAMA_HOST=' + $ollamaHost + '" && "' + $ollamaExe + '" serve'
+  try {
+    Start-Process cmd.exe -ArgumentList @(
+      "/c",
+      $command
+    ) | Out-Null
+    Write-TrayLog "Restarted Ollama with OLLAMA_HOST=$ollamaHost"
+  } catch {
+    Write-TrayLog "Failed to restart Ollama for LAN binding: $($_.Exception.Message)" "error"
+    return $false
+  }
+
+  $deadline = (Get-Date).AddSeconds(15)
+  while ((Get-Date) -lt $deadline) {
+    Start-Sleep -Milliseconds 500
+    $addresses = Get-OllamaListenerAddresses
+    if ($addresses -contains "0.0.0.0" -or $addresses -contains "::" -or $addresses -contains "192.168.1.118") {
+      return $true
+    }
+  }
+
+  Write-TrayLog "Ollama did not expose a LAN listener after restart." "warn"
+  return $false
+}
+
+function Ensure-OllamaLanReachable {
+  $addresses = Get-OllamaListenerAddresses
+  if ($addresses -contains "0.0.0.0" -or $addresses -contains "::" -or $addresses -contains "192.168.1.118") {
+    Write-TrayLog "Ollama already listening on LAN address(es): $($addresses -join ', ')"
+    Ensure-OllamaFirewallRule
+    return
+  }
+
+  if ($addresses -contains "127.0.0.1" -or $addresses -contains "::1") {
+    Write-TrayLog "Ollama is loopback-only ($($addresses -join ', ')); restarting for LAN reachability."
+  } else {
+    Write-TrayLog "Ollama listener not detected on port $ollamaLanPort; attempting LAN restart." "warn"
+  }
+
+  if (Restart-OllamaForLan) {
+    Ensure-OllamaFirewallRule
+  }
+}
+
+Ensure-OllamaLanReachable
 
 # ---------- Icon factory ----------------------------------------------------
 function ConvertTo-Icon {
@@ -524,7 +674,7 @@ $allowItem.add_Click({
   # the next poll tick.
   if ($script:gamingActive) {
     $script:suppressAutoUntil = "session"
-    Write-TrayLog "Manual allow while gaming — auto-restrict suppressed for this session."
+    Write-TrayLog "Manual allow while gaming -- auto-restrict suppressed for this session."
   }
   $script:restrictedByAuto = $false
   Set-LocalAiPolicy -Allowed $true | Out-Null

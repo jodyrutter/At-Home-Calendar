@@ -9,9 +9,13 @@
 // active theme via the `data-theme` attribute on <html>. Animation pauses
 // when the document is hidden so it never burns CPU on background tabs.
 
-const EMBER_COUNT = 42;
-const SPARK_COUNT = 26;
+const BASE_EMBER_COUNT = 30;
+const BASE_SPARK_COUNT = 18;
 const AURORA_BAND_COUNT = 3;
+const ACTIVE_FPS = 30;
+const IDLE_FPS = 18;
+const UNFOCUSED_FPS = 10;
+const POINTER_IDLE_MS = 1800;
 
 const root = document.documentElement;
 
@@ -51,6 +55,21 @@ function ensureContainer() {
 
 function rand(min, max) {
   return Math.random() * (max - min) + min;
+}
+
+function ambientCanvasDpr() {
+  const deviceDpr = window.devicePixelRatio || 1;
+  return Math.min(deviceDpr, deviceDpr >= 1.75 ? 1.25 : 1.4);
+}
+
+function particleCounts(width, height) {
+  const baselineArea = 1440 * 900;
+  const areaScale = Math.sqrt((width * height) / baselineArea);
+  const scale = Math.max(0.72, Math.min(1.12, areaScale));
+  return {
+    embers: Math.round(BASE_EMBER_COUNT * scale),
+    sparks: Math.round(BASE_SPARK_COUNT * scale)
+  };
 }
 
 function makeEmber(width, height) {
@@ -194,7 +213,7 @@ function startAmbient() {
   const container = ensureContainer();
   const canvas = container.querySelector(".hearthboard-ambient-canvas");
   const ctx = canvas.getContext("2d", { alpha: true });
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let dpr = ambientCanvasDpr();
 
   let width = window.innerWidth;
   let height = window.innerHeight;
@@ -204,20 +223,30 @@ function startAmbient() {
   let nextShootingStarAt = performance.now() + rand(12000, 24000);
   let pointer = { x: width / 2, y: height + 80, active: false, last: 0 };
   let lastFrame = performance.now();
+  let lastPaint = lastFrame;
   let running = true;
   let rafHandle = 0;
 
   function resize() {
     width = window.innerWidth;
     height = window.innerHeight;
+    dpr = ambientCanvasDpr();
     canvas.width = Math.floor(width * dpr);
     canvas.height = Math.floor(height * dpr);
     canvas.style.width = `${width}px`;
     canvas.style.height = `${height}px`;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    embers = Array.from({ length: EMBER_COUNT }, () => makeEmber(width, height));
-    sparks = Array.from({ length: SPARK_COUNT }, () => makeSpark(width, height));
+    const counts = particleCounts(width, height);
+    embers = Array.from({ length: counts.embers }, () => makeEmber(width, height));
+    sparks = Array.from({ length: counts.sparks }, () => makeSpark(width, height));
+  }
+
+  function targetFrameBudget(now) {
+    const focused = document.hasFocus();
+    const recentlyActive = pointer.active || (now - pointer.last) < POINTER_IDLE_MS;
+    const fps = !focused ? UNFOCUSED_FPS : recentlyActive ? ACTIVE_FPS : IDLE_FPS;
+    return 1000 / fps;
   }
 
   function step(now) {
@@ -225,8 +254,18 @@ function startAmbient() {
       return;
     }
 
+    if (pointer.active && now - pointer.last > POINTER_IDLE_MS) {
+      pointer.active = false;
+    }
+
+    if (now - lastPaint < targetFrameBudget(now)) {
+      rafHandle = window.requestAnimationFrame(step);
+      return;
+    }
+
     const delta = Math.min(64, now - lastFrame);
     lastFrame = now;
+    lastPaint = now;
     const dark = isDarkTheme();
 
     ctx.clearRect(0, 0, width, height);
@@ -302,7 +341,18 @@ function startAmbient() {
     }
     running = true;
     lastFrame = performance.now();
+    lastPaint = lastFrame;
     rafHandle = window.requestAnimationFrame(step);
+  }
+
+  function maybeResume() {
+    if (document.hidden || !document.hasFocus()) {
+      return;
+    }
+    if (document.body?.classList.contains("is-scrolling")) {
+      return;
+    }
+    resume();
   }
 
   function handlePointer(event) {
@@ -316,11 +366,19 @@ function startAmbient() {
     pointer.active = false;
   }
 
+  function syncIdleState() {
+    if (!document.body) {
+      return;
+    }
+    document.body.classList.toggle("is-ambient-idle", !document.hasFocus());
+  }
+
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
       pause();
     } else {
-      resume();
+      syncIdleState();
+      maybeResume();
     }
   });
 
@@ -335,14 +393,23 @@ function startAmbient() {
     if (running) {
       pause();
     }
+    // Signal CSS to freeze decorative animations (aurora, hearth breathe,
+    // hero shimmer) while the page is moving. Those layers use blur +
+    // saturate which is cheap at rest but expensive to repaint during
+    // scroll — pausing them keeps scroll buttery without changing the
+    // visuals at rest.
+    if (document.body && !document.body.classList.contains("is-scrolling")) {
+      document.body.classList.add("is-scrolling");
+    }
     if (scrollResumeHandle) {
       clearTimeout(scrollResumeHandle);
     }
     scrollResumeHandle = window.setTimeout(() => {
       scrollResumeHandle = 0;
-      if (!document.hidden) {
-        resume();
+      if (document.body) {
+        document.body.classList.remove("is-scrolling");
       }
+      maybeResume();
     }, SCROLL_RESUME_DELAY_MS);
   };
   window.addEventListener("scroll", onScroll, { passive: true, capture: true });
@@ -350,57 +417,92 @@ function startAmbient() {
   window.addEventListener("resize", resize);
   window.addEventListener("pointermove", handlePointer, { passive: true });
   window.addEventListener("pointerleave", handlePointerLeave);
-  window.addEventListener("blur", handlePointerLeave);
+  window.addEventListener("blur", () => {
+    handlePointerLeave();
+    syncIdleState();
+    pause();
+  });
+  window.addEventListener("focus", () => {
+    syncIdleState();
+    maybeResume();
+  });
 
   resize();
-  rafHandle = window.requestAnimationFrame(step);
+  syncIdleState();
+  if (document.hasFocus()) {
+    rafHandle = window.requestAnimationFrame(step);
+  }
 }
 
 function bindThemeReactiveGlow() {
-  const cards = document.querySelectorAll(".card");
-  if (!cards.length) {
-    return;
+  // Track only the currently hovered card. The previous implementation looped
+  // through every card on every pointermove and called getBoundingClientRect()
+  // on each one, which is expensive on pages with lots of cards.
+  let activeCard = null;
+  let latestPoint = null;
+  let pendingFrame = false;
+
+  function clearGlow(card) {
+    if (!card) {
+      return;
+    }
+    card.style.removeProperty("--card-glow-x");
+    card.style.removeProperty("--card-glow-y");
   }
 
-  // Only update the radial glow under the cursor — no tilt. Also throttled
-  // via rAF so low-end laptops don't drop frames on every pointermove.
-  let latestEvent = null;
-  let pendingFrame = false;
+  function setActiveCard(card) {
+    if (activeCard === card) {
+      return;
+    }
+    clearGlow(activeCard);
+    activeCard = card;
+  }
 
   const applyGlow = () => {
     pendingFrame = false;
-    if (!latestEvent) return;
-    const event = latestEvent;
-
-    for (const card of cards) {
-      const rect = card.getBoundingClientRect();
-      if (
-        event.clientX < rect.left - 40 ||
-        event.clientX > rect.right + 40 ||
-        event.clientY < rect.top - 40 ||
-        event.clientY > rect.bottom + 40
-      ) {
-        card.style.removeProperty("--card-glow-x");
-        card.style.removeProperty("--card-glow-y");
-        continue;
-      }
-
-      const x = (event.clientX - rect.left) / rect.width;
-      const y = (event.clientY - rect.top) / rect.height;
-      card.style.setProperty("--card-glow-x", `${x * 100}%`);
-      card.style.setProperty("--card-glow-y", `${y * 100}%`);
+    if (!activeCard || !latestPoint) {
+      return;
     }
+
+    const rect = activeCard.getBoundingClientRect();
+    if (!rect.width || !rect.height) {
+      return;
+    }
+
+    const x = Math.min(1, Math.max(0, (latestPoint.clientX - rect.left) / rect.width));
+    const y = Math.min(1, Math.max(0, (latestPoint.clientY - rect.top) / rect.height));
+    activeCard.style.setProperty("--card-glow-x", `${x * 100}%`);
+    activeCard.style.setProperty("--card-glow-y", `${y * 100}%`);
   };
 
   const onMove = (event) => {
-    latestEvent = event;
+    const card = event.target instanceof Element ? event.target.closest(".card") : null;
+    if (!card) {
+      setActiveCard(null);
+      latestPoint = null;
+      return;
+    }
+
+    setActiveCard(card);
+    latestPoint = { clientX: event.clientX, clientY: event.clientY };
     if (!pendingFrame) {
       pendingFrame = true;
       window.requestAnimationFrame(applyGlow);
     }
   };
 
-  window.addEventListener("pointermove", onMove, { passive: true });
+  const reset = () => {
+    latestPoint = null;
+    setActiveCard(null);
+  };
+
+  document.addEventListener("pointermove", onMove, { passive: true });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      reset();
+    }
+  });
+  window.addEventListener("blur", reset);
 }
 
 function revealOnScroll() {

@@ -1,21 +1,29 @@
 const ROUTES = {
-  local: {
-    label: "Home network",
-    baseUrl: "https://192.168.1.118:42069"
+  pi: {
+    label: "Raspberry Pi",
+    baseUrl: String(import.meta.env.VITE_HEARTHBOARD_PI_URL || "https://192.168.1.220:42069").trim(),
+    kind: "local"
+  },
+  backup: {
+    label: "Windows backup",
+    baseUrl: String(import.meta.env.VITE_HEARTHBOARD_WINDOWS_BACKUP_URL || "https://192.168.1.118:42069").trim(),
+    kind: "local"
   },
   remote: {
     label: "DuckDNS",
-    baseUrl: "https://jodyrutter-sh.duckdns.org"
+    baseUrl: String(import.meta.env.VITE_HEARTHBOARD_REMOTE_URL || "https://jodyrutter-sh.duckdns.org").trim(),
+    kind: "remote"
   }
 };
 
 const searchParams = new URLSearchParams(window.location.search);
-const preferredRouteId = searchParams.get("preferredRoute") === "local" ? "local" : "remote";
+const preferredRouteId = searchParams.get("preferredRoute") === "remote" ? "remote" : "pi";
 
 const elements = {
   retry: document.querySelector("#retry-connection"),
   openPreferred: document.querySelector("#open-preferred"),
-  openLocal: document.querySelector("#open-local"),
+  openPi: document.querySelector("#open-pi"),
+  openBackup: document.querySelector("#open-backup"),
   openRemote: document.querySelector("#open-remote"),
   openPreferredLabel: document.querySelector("#open-preferred-label"),
   connectionPill: document.querySelector("#connection-pill"),
@@ -52,13 +60,14 @@ function openRoute(routeId) {
 
 function describePreferredRoute(routeId) {
   const route = ROUTES[routeId];
-  elements.connectionTitle.textContent = routeId === "local" ? "Ready to open your home route" : "Ready to open DuckDNS";
-  elements.connectionDescription.textContent = routeId === "local"
-    ? "Android detected a local-style connection. Tap the main button to open your LAN HTTPS board."
-    : "Android detected a non-local connection. Tap the main button to open your public DuckDNS board.";
+  const isRemote = route?.kind === "remote";
+  elements.connectionTitle.textContent = isRemote ? "Ready to open DuckDNS" : `Ready to open ${route.label}`;
+  elements.connectionDescription.textContent = isRemote
+    ? "Android detected a non-local connection. Tap the main button to open your public DuckDNS board."
+    : "Android detected a local-style connection. Tap the main button to open the best local Hearthboard route.";
   elements.connectionRoute.textContent = route.label;
   elements.notificationStatus.textContent = "Runs after sign in";
-  elements.openPreferredLabel.textContent = routeId === "local" ? "Open home route" : "Open DuckDNS route";
+  elements.openPreferredLabel.textContent = isRemote ? "Open DuckDNS route" : `Open ${route.label}`;
 }
 
 function setStatus({ pillClass, pillText, title, description, routeLabel, notificationLabel }) {
@@ -140,9 +149,9 @@ async function probeRoute(routeId) {
 }
 
 function preferredOrder() {
-  return preferredRouteId === "local"
-    ? ["local", "remote"]
-    : ["remote", "local"];
+  return preferredRouteId === "remote"
+    ? ["remote", "pi", "backup"]
+    : ["pi", "backup", "remote"];
 }
 
 async function runRouteSelection() {
@@ -201,7 +210,8 @@ elements.retry.addEventListener("click", () => {
   runRouteSelection();
 });
 elements.openPreferred.addEventListener("click", () => openRoute(preferredRouteId));
-elements.openLocal.addEventListener("click", () => openRoute("local"));
+elements.openPi.addEventListener("click", () => openRoute("pi"));
+elements.openBackup.addEventListener("click", () => openRoute("backup"));
 elements.openRemote.addEventListener("click", () => openRoute("remote"));
 
 describePreferredRoute(preferredRouteId);

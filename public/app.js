@@ -321,12 +321,20 @@ function renderCalendar() {
         <span class="meta-label">${dayEvents.length ? `${dayEvents.length} item${dayEvents.length > 1 ? "s" : ""}` : ""}</span>
       </div>
       <div class="stack">
-        ${dayEvents.map((event, pillIndex) => `
+        ${dayEvents.map((event, pillIndex) => {
+          const provider = event?.source?.provider;
+          const badge = provider === "google"
+            ? '<span class="event-source-badge source-google" aria-label="Imported from Google Calendar" title="Imported from Google Calendar">G</span>'
+            : provider === "microsoft"
+            ? '<span class="event-source-badge source-microsoft" aria-label="Imported from Outlook Calendar" title="Imported from Outlook Calendar">O</span>'
+            : "";
+          return `
           <div class="event-pill" data-pill-index="${pillIndex}">
-            <strong>${escapeHtml(event.title)}</strong><br />
+            <strong>${badge}${escapeHtml(event.title)}</strong><br />
             <span>${event.allDay ? "All day" : escapeHtml(formatEventRange(event))}</span>
           </div>
-        `).join("")}
+        `;
+        }).join("")}
       </div>
     `;
     // Apply per-category tint through the CSSOM, not inline style attrs.
@@ -446,8 +454,15 @@ function eventCard(event, includeEdit = true) {
   const completedAt = currentUserCompletion(event);
   const canComplete = currentUserCanComplete(event);
 
+  const provider = event?.source?.provider;
+  const sourceBadge = provider === "google"
+    ? '<span class="event-source-badge source-google" title="Imported from Google Calendar" aria-label="Imported from Google Calendar">G</span>'
+    : provider === "microsoft"
+    ? '<span class="event-source-badge source-microsoft" title="Imported from Outlook Calendar" aria-label="Imported from Outlook Calendar">O</span>'
+    : "";
+
   article.innerHTML = `
-    <h3>${escapeHtml(event.title)}</h3>
+    <h3>${sourceBadge}${escapeHtml(event.title)}</h3>
     <p class="event-card-meta">${escapeHtml(formatEventRange(event))}</p>
     <p class="event-card-meta">${escapeHtml(event.category)}${event.location ? ` | ${escapeHtml(event.location)}` : ""}</p>
     <p class="event-card-meta">${escapeHtml(assignedNames || "Unassigned")}</p>

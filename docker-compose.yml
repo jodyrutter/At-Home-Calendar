@@ -35,6 +35,12 @@ services:
       OLLAMA_KEEP_ALIVE: "0"
       OLLAMA_AWAKE_KEEP_ALIVE: 5m
       OLLAMA_TIMEOUT_MS: 120000
+      GOOGLE_OAUTH_CLIENT_ID: "${GOOGLE_OAUTH_CLIENT_ID:-}"
+      GOOGLE_OAUTH_CLIENT_SECRET: "${GOOGLE_OAUTH_CLIENT_SECRET:-}"
+      MICROSOFT_OAUTH_CLIENT_ID: "${MICROSOFT_OAUTH_CLIENT_ID:-}"
+      MICROSOFT_OAUTH_CLIENT_SECRET: "${MICROSOFT_OAUTH_CLIENT_SECRET:-}"
+      INTEGRATION_TOKEN_ENCRYPTION_KEY: "${INTEGRATION_TOKEN_ENCRYPTION_KEY:-}"
+      INTEGRATION_PUBLIC_ORIGIN: "${INTEGRATION_PUBLIC_ORIGIN:-https://${HEARTHBOARD_PUBLIC_DOMAIN:-jodyrutter-sh.duckdns.org}}"
       MEDIA_LIBRARY_ROOTS: '[{"id":"drone","label":"Drone pictures","path":"/libraries/drone"},{"id":"japan","label":"Japan","path":"/libraries/japan","writable":true},{"id":"general","label":"General","path":"/libraries/general","excludePaths":["Pretty Pictures"],"writable":true},{"id":"phone","label":"Phone","path":"/libraries/phone","authMode":"always","quarantinePath":"/libraries/phone-quarantine","writable":true}]'
     volumes:
       - hearthboard-data:/app/data
